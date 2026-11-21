@@ -103,15 +103,23 @@ fn utf16_lossy(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units)
 }
 
+/// The NTFS fixup stride: multi-sector protection always covers 512-byte
+/// blocks, regardless of the volume's (logical or physical) sector size.
+/// Callers pass this constant to [`apply_fixups`], never the boot sector's
+/// bytes-per-sector.
+pub const FIXUP_BLOCK_SIZE: usize = 512;
+
 /// Undoes the NTFS multi-sector protection in place.
 ///
 /// The update sequence array (offset at `0x04`, count at `0x06`) holds the
 /// sequence number followed by one saved word per protected block. The last
 /// word of every block must equal the sequence number and is replaced by the
-/// saved word. `bytes_per_sector` is the protection stride; NTFS always uses
-/// 512 here, independent of the physical sector size.
-pub fn apply_fixups(record: &mut [u8], bytes_per_sector: usize) -> Result<(), NtfsError> {
-    if bytes_per_sector < 2 || !bytes_per_sector.is_multiple_of(2) {
+/// saved word. `block_size` is the protection stride; pass
+/// [`FIXUP_BLOCK_SIZE`]. The array must cover the record exactly
+/// (`(usa_count - 1) * block_size == record.len()`), so a wrong stride or a
+/// short array is `Malformed`.
+pub fn apply_fixups(record: &mut [u8], block_size: usize) -> Result<(), NtfsError> {
+    if block_size < 2 || !block_size.is_multiple_of(2) {
         return Err(NtfsError::Malformed("invalid fixup stride"));
     }
     if record.len() < 8 {
@@ -129,27 +137,27 @@ pub fn apply_fixups(record: &mut [u8], bytes_per_sector: usize) -> Result<(), Nt
     if !usa_off.is_multiple_of(2) {
         return Err(NtfsError::Malformed("odd update sequence array offset"));
     }
-    // blocks <= 0xFFFE and bytes_per_sector <= usize::MAX: use checked math.
+    // blocks <= 0xFFFE and block_size <= usize::MAX: use checked math.
     let covered = blocks
-        .checked_mul(bytes_per_sector)
+        .checked_mul(block_size)
         .ok_or(NtfsError::Malformed("update sequence array too long"))?;
-    if covered > record.len() {
-        return Err(NtfsError::Malformed("update sequence array covers more than the record"));
+    if covered != record.len() {
+        return Err(NtfsError::Malformed("update sequence array does not cover the record exactly"));
     }
     // The array must lie inside the first block, before its protected word.
-    if usa_off + 2 * usa_count > bytes_per_sector - 2 {
-        return Err(NtfsError::Malformed("update sequence array outside the first sector"));
+    if usa_off + 2 * usa_count > block_size - 2 {
+        return Err(NtfsError::Malformed("update sequence array outside the first block"));
     }
     let usn = u16_at(record, usa_off)?;
     // Check every block before changing anything.
     for i in 0..blocks {
-        let end = (i + 1) * bytes_per_sector - 2;
+        let end = (i + 1) * block_size - 2;
         if u16_at(record, end)? != usn {
             return Err(NtfsError::BadFixup);
         }
     }
     for i in 0..blocks {
-        let end = (i + 1) * bytes_per_sector - 2;
+        let end = (i + 1) * block_size - 2;
         let saved = bytes_at::<2>(record, usa_off + 2 * (i + 1))?;
         record[end..end + 2].copy_from_slice(&saved);
     }
@@ -562,6 +570,26 @@ mod tests {
         assert_eq!(info.allocated, 0);
         assert!(!info.is_dir);
         assert_eq!(info.base_record, 0);
+    }
+
+    #[test]
+    fn record_4k_uses_512_byte_blocks() {
+        let b = || RecordBuilder::new(4096).file_name(5, "tiny", 1).data_resident("", 100);
+        let mut r = b().build(FIXUP_BLOCK_SIZE);
+        assert_eq!(u16::from_le_bytes([r[0x06], r[0x07]]), 9); // 8 blocks + USN
+        assert_eq!(apply_fixups(&mut r, FIXUP_BLOCK_SIZE), Ok(()));
+        assert_eq!(parse_record(&r, 30, false).unwrap().size, Some(100));
+
+        // the volume's 4 KB sector size is the wrong stride
+        let mut r = b().build(FIXUP_BLOCK_SIZE);
+        assert!(matches!(apply_fixups(&mut r, 4096), Err(NtfsError::Malformed(_))));
+    }
+
+    #[test]
+    fn short_update_sequence_array() {
+        let mut r = RecordBuilder::new(1024).file_name(5, "a", 1).build(FIXUP_BLOCK_SIZE);
+        r[0x06] = 2; // covers one 512-byte block of a 1024-byte record
+        assert!(matches!(apply_fixups(&mut r, FIXUP_BLOCK_SIZE), Err(NtfsError::Malformed(_))));
     }
 
     #[test]

@@ -188,7 +188,9 @@ impl RecordBuilder {
     }
 
     /// Serializes the record and protects it with fixups at every
-    /// `bytes_per_sector` boundary, like NTFS does before writing.
+    /// `bytes_per_sector` boundary, like NTFS does before writing. Real NTFS
+    /// always uses 512 here (`record::FIXUP_BLOCK_SIZE`), also for 4 KB
+    /// records; other values only build deliberately mismatched records.
     pub fn build(self, bytes_per_sector: usize) -> Vec<u8> {
         let size = self.record_size;
         assert!(bytes_per_sector >= 2 && size.is_multiple_of(bytes_per_sector));
