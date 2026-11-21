@@ -84,10 +84,29 @@ fn column_key(col: Col, metric: Metric) -> SortKey {
     }
 }
 
-/// The sort order after a click on the header of `key`: the same column flips
-/// the direction; a new column starts ascending for names, descending otherwise.
-fn next_sort(current: (SortKey, bool), key: SortKey) -> (SortKey, bool) {
-    if current.0 == key { (key, !current.1) } else { (key, key != SortKey::Name) }
+/// The one column that shows the sort triangle: `% of Parent` if it was the
+/// last clicked header and the rows are sorted by the chosen metric, otherwise
+/// the column of the sort key.
+fn sorted_column(key: SortKey, metric: Metric, percent_sorted: bool) -> Col {
+    if percent_sorted && key == column_key(Col::Percent, metric) {
+        return Col::Percent;
+    }
+    match key {
+        SortKey::Name => Col::Name,
+        SortKey::Allocated => Col::Allocated,
+        SortKey::Size => Col::Size,
+        SortKey::Files => Col::Files,
+        SortKey::Dirs => Col::Folders,
+        SortKey::Modified => Col::Modified,
+    }
+}
+
+/// The sort order after a click on `clicked` while `shown` has the triangle:
+/// the same column flips the direction; another column starts ascending for
+/// names, descending otherwise.
+fn next_sort(current: (SortKey, bool), shown: Col, clicked: Col, metric: Metric) -> (SortKey, bool) {
+    let key = column_key(clicked, metric);
+    if clicked == shown { (key, !current.1) } else { (key, key != SortKey::Name) }
 }
 
 /// The path handed to Explorer and the clipboard; a drive root `C:` becomes `C:\`.
@@ -195,6 +214,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
 
     let metric = view.metric();
     let (sort_key, desc) = view.sort();
+    let shown = sorted_column(sort_key, metric, view.percent_sorted());
     let row_height = ui.spacing().interact_size.y;
     let mut header_click = None;
     let mut input = RowInput::default();
@@ -221,10 +241,9 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
         builder
             .header(row_height, |mut header| {
                 for (col, title) in COLUMNS {
-                    let key = column_key(col, metric);
-                    let sorted = (key == sort_key).then_some(desc);
+                    let sorted = (col == shown).then_some(desc);
                     if header_cell(&mut header, col, title, sorted) {
-                        header_click = Some(key);
+                        header_click = Some(col);
                     }
                 }
             })
@@ -286,8 +305,9 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     if let Some(index) = input.select {
         view.select_row(index);
     }
-    if let Some(key) = header_click {
-        let (key, desc) = next_sort((sort_key, desc), key);
+    if let Some(col) = header_click {
+        let (key, desc) = next_sort((sort_key, desc), shown, col, metric);
+        view.set_percent_sorted(col == Col::Percent);
         view.set_sort(tree, key, desc);
     }
     if let Some(node) = input.toggle {
@@ -352,11 +372,54 @@ mod tests {
 
     #[test]
     fn header_click_sorts_and_second_click_flips() {
-        assert!(next_sort((SortKey::Allocated, true), SortKey::Size) == (SortKey::Size, true));
-        assert!(next_sort((SortKey::Size, true), SortKey::Size) == (SortKey::Size, false));
-        assert!(next_sort((SortKey::Size, true), SortKey::Name) == (SortKey::Name, false));
+        let a = Metric::Allocated;
+        assert!(next_sort((SortKey::Allocated, true), Col::Allocated, Col::Size, a) == (SortKey::Size, true));
+        assert!(next_sort((SortKey::Size, true), Col::Size, Col::Size, a) == (SortKey::Size, false));
+        assert!(next_sort((SortKey::Size, true), Col::Size, Col::Name, a) == (SortKey::Name, false));
         assert!(column_key(Col::Percent, Metric::Size) == SortKey::Size);
         assert!(column_key(Col::Percent, Metric::Allocated) == SortKey::Allocated);
+    }
+
+    #[test]
+    fn percent_header_first_click_sorts_descending_then_flips() {
+        let a = Metric::Allocated;
+        // Default: sorted by Allocated, triangle on Allocated. A click on % of Parent
+        // is a new column, so it starts descending instead of flipping.
+        assert!(next_sort((SortKey::Allocated, true), Col::Allocated, Col::Percent, a) == (SortKey::Allocated, true));
+        assert!(next_sort((SortKey::Allocated, true), Col::Percent, Col::Percent, a) == (SortKey::Allocated, false));
+        // And back from % of Parent to Allocated starts descending again.
+        assert!(next_sort((SortKey::Allocated, false), Col::Percent, Col::Allocated, a) == (SortKey::Allocated, true));
+    }
+
+    #[test]
+    fn triangle_defaults_to_the_metric_column() {
+        assert!(sorted_column(SortKey::Allocated, Metric::Allocated, false) == Col::Allocated);
+        assert!(sorted_column(SortKey::Size, Metric::Size, false) == Col::Size);
+    }
+
+    #[test]
+    fn triangle_stays_on_percent_after_metric_switch() {
+        assert!(sorted_column(SortKey::Allocated, Metric::Allocated, true) == Col::Percent);
+        // set_metric moved the key to Size; the triangle stays on % of Parent.
+        assert!(sorted_column(SortKey::Size, Metric::Size, true) == Col::Percent);
+    }
+
+    #[test]
+    fn triangle_on_metric_column_follows_the_metric() {
+        // After set_metric(Size) the key is Size, so the triangle moves to Size.
+        assert!(sorted_column(SortKey::Size, Metric::Size, false) == Col::Size);
+        assert!(sorted_column(SortKey::Allocated, Metric::Allocated, false) == Col::Allocated);
+    }
+
+    #[test]
+    fn triangle_on_other_clicked_column() {
+        let m = Metric::Allocated;
+        assert!(sorted_column(SortKey::Name, m, false) == Col::Name);
+        assert!(sorted_column(SortKey::Files, m, false) == Col::Files);
+        assert!(sorted_column(SortKey::Dirs, m, false) == Col::Folders);
+        assert!(sorted_column(SortKey::Modified, m, false) == Col::Modified);
+        // The metric column that is not the chosen one.
+        assert!(sorted_column(SortKey::Size, m, false) == Col::Size);
     }
 
     #[test]

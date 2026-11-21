@@ -38,6 +38,9 @@ pub struct TreeView {
     rows: Vec<Row>,
     /// Row index of `selected`, kept up to date by `rebuild`.
     selected_row: usize,
+    /// The last clicked table header was `% of Parent`; only decides where
+    /// the table shows its sort triangle.
+    percent_sorted: bool,
 }
 
 fn metric_key(metric: Metric) -> SortKey {
@@ -61,6 +64,7 @@ impl TreeView {
             sorted: HashMap::new(),
             rows: Vec::new(),
             selected_row: 0,
+            percent_sorted: false,
         };
         view.rebuild(tree);
         view
@@ -102,6 +106,15 @@ impl TreeView {
         self.desc = desc;
         self.sorted.clear();
         self.rebuild(tree);
+    }
+
+    /// True if the last clicked table header was `% of Parent`.
+    pub fn percent_sorted(&self) -> bool {
+        self.percent_sorted
+    }
+
+    pub fn set_percent_sorted(&mut self, percent_sorted: bool) {
+        self.percent_sorted = percent_sorted;
     }
 
     pub fn metric(&self) -> Metric {
