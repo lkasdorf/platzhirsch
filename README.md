@@ -9,6 +9,10 @@ Platzhirsch reads the NTFS Master File Table directly instead of asking Windows 
 folder one by one. On the development machine, a full scan of an NVMe drive with
 1.87 million entries takes 2.1 seconds.
 
+![Platzhirsch main window: the folder table above, the treemap below](docs/screenshot.png)
+
+*A folder scan of `C:\Windows` without administrator rights.*
+
 > **Status:** in development. Version 0.1.0 is being built on the `v1` branch and has not
 > been released yet. The scanners are finished and measured, and the user interface for
 > 0.1.0 is complete: a folder table with a treemap below it. See the

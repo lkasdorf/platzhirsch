@@ -677,7 +677,7 @@ pub fn bar_fraction(tree: &Tree, node: NodeId, metric: Metric) -> f32;   // shar
 pub fn marker_text(flags: u8) -> Option<&'static str>;
 ```
 
-Columns in this order with fixed headers: `Name`, `Allocated`, `Size`, `Files`, `Folders`, `% of Parent`, `Modified`. Draw only visible rows (virtualized rows from `egui_extras`). Bar behind the name according to `bar_fraction`. Click on a header: sorts, a second click reverses the direction; `% of Parent` sorts by the chosen metric. File rows leave `Files` and `Folders` empty. Click selects, click on the arrow expands or collapses, double-click on a folder expands or collapses. Arrow keys via `key_nav`, the selection scrolls into view. Context menu exactly: `Show in Explorer`, `Copy path`. Marker behind the name in a muted colour.
+Columns in this order with fixed headers: `Name`, `Allocated`, `Size`, `Files`, `Folders`, `% of Parent`, `Modified`. Draw only visible rows (virtualized rows from `egui_extras`). Bar behind the name according to `bar_fraction`. Click on a header: sorts, a second click reverses the direction; `% of Parent` sorts by the chosen metric. Exactly one header shows the sort triangle: the one clicked last, or the chosen metric's column after a scan (added on 2026-11-21 at Leon's request, built as Task 12b). File rows leave `Files` and `Folders` empty. Click selects, click on the arrow expands or collapses, double-click on a folder expands or collapses. Arrow keys via `key_nav`, the selection scrolls into view. Context menu exactly: `Show in Explorer`, `Copy path`. Marker behind the name in a muted colour.
 
 - [ ] **Step 1: Write tests**
 
