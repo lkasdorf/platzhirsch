@@ -2,6 +2,13 @@
 name = "platzhirsch"
 version = "0.1.0"
 edition = "2024"
+description = "Fast disk space analyzer for Windows that reads the NTFS Master File Table directly"
+license = "MIT"
+repository = "https://github.com/lkasdorf/platzhirsch"
+readme = "README.md"
+keywords = ["disk-usage", "ntfs", "windows", "treemap", "mft"]
+categories = ["filesystem", "visualization"]
+publish = false
 
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
