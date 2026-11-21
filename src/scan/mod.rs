@@ -15,6 +15,22 @@ pub enum ScanTarget {
     Folder(std::path::PathBuf),
 }
 
+impl ScanTarget {
+    /// A drive root (`C:`, `C:\`, `c:/`) becomes the whole volume, any
+    /// other path a folder.
+    pub fn from_path(path: std::path::PathBuf) -> ScanTarget {
+        if let Some(s) = path.to_str() {
+            let mut chars = s.strip_suffix(['\\', '/']).unwrap_or(s).chars();
+            if let (Some(letter), Some(':'), None) = (chars.next(), chars.next(), chars.next())
+                && letter.is_ascii_alphabetic()
+            {
+                return ScanTarget::Volume(letter.to_ascii_uppercase());
+            }
+        }
+        ScanTarget::Folder(path)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScanMethod {
     Mft,
@@ -116,6 +132,18 @@ mod tests {
         assert_eq!(choose_method(&dir, true, "NTFS"), MethodChoice::Walk);
         assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, ""), MethodChoice::Walk);
         assert_eq!(choose_method(&vol, true, "ntfs"), MethodChoice::Mft);
+    }
+
+    #[test]
+    fn drive_roots_become_volumes() {
+        let target = |s: &str| ScanTarget::from_path(s.into());
+        for root in ["C:", r"C:\", "c:/", r"d:\"] {
+            assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
+        }
+        assert!(matches!(target(r"c:\"), ScanTarget::Volume('C')));
+        for folder in [r"C:\DRIVE", r"C:\\", r"\\nas\share", r"\\?\C:\", "1:", "src"] {
+            assert!(matches!(target(folder), ScanTarget::Folder(ref p) if p.as_os_str() == folder), "{folder}");
+        }
     }
 
     #[test]

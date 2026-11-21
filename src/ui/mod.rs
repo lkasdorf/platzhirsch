@@ -209,7 +209,7 @@ impl App {
             Err(TryRecvError::Empty) => {}
             Ok(picked) => {
                 if let Some(path) = picked {
-                    self.set_target(ScanTarget::Folder(path));
+                    self.set_target(ScanTarget::from_path(path));
                 }
                 self.folder_rx = None;
             }
@@ -362,6 +362,7 @@ pub fn run(initial: Option<ScanTarget>) -> eframe::Result<()> {
 mod tests {
     use super::*;
     use crate::model::{F_DIR, NO_PARENT, TreeBuilder};
+    use std::path::Path;
 
     fn done_phase() -> Phase {
         let mut b = TreeBuilder::with_capacity(1, 2);
@@ -396,6 +397,34 @@ mod tests {
     fn same_drive_again_keeps_the_hint() {
         let next = after_target_change(Phase::AskElevation('C'), Some(&ScanTarget::Volume('C')), &ScanTarget::Volume('C'));
         assert!(matches!(next, Phase::AskElevation('C')));
+    }
+
+    fn app_with_picked_folder(picked: &str) -> App {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Some(PathBuf::from(picked))).unwrap();
+        let mut app = App {
+            volumes: Vec::new(),
+            target: None,
+            metric: Metric::Allocated,
+            show_treemap: true,
+            phase: Phase::Idle,
+            folder_rx: Some(rx),
+        };
+        app.poll_folder();
+        app
+    }
+
+    #[test]
+    fn drive_root_from_folder_dialog_is_a_volume() {
+        let app = app_with_picked_folder(r"D:\");
+        assert!(matches!(app.target, Some(ScanTarget::Volume('D'))));
+        assert!(app.folder_rx.is_none());
+    }
+
+    #[test]
+    fn folder_from_folder_dialog_stays_a_folder() {
+        let app = app_with_picked_folder(r"D:\photos");
+        assert!(matches!(app.target, Some(ScanTarget::Folder(ref p)) if p == Path::new(r"D:\photos")));
     }
 
     #[test]

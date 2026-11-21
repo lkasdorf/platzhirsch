@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::scan::mft::VolumeReader;
@@ -162,6 +162,13 @@ pub fn relaunch_elevated(args: &[String]) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::other(format!("Restart with administrator rights failed (code {})", result.0 as usize)))
     }
+}
+
+/// Shows a native error message box and waits until it is closed.
+pub fn show_error(title: &str, text: &str) {
+    let (title, text) = (HSTRING::from(title), HSTRING::from(text));
+    // SAFETY: both strings are NUL-terminated and outlive the call; no owner window is passed.
+    let _ = unsafe { MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR) };
 }
 
 /// Opens an Explorer window with `path` selected.

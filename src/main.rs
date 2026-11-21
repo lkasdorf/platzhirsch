@@ -10,19 +10,16 @@ pub fn parse_args(args: &[String]) -> Option<ScanTarget> {
     if flag != "--scan" || target.is_empty() {
         return None;
     }
-    let trimmed = target.strip_suffix(['\\', '/']).unwrap_or(target);
-    let mut chars = trimmed.chars();
-    if let (Some(letter), Some(':'), None) = (chars.next(), chars.next(), chars.next())
-        && letter.is_ascii_alphabetic()
-    {
-        return Some(ScanTarget::Volume(letter.to_ascii_uppercase()));
-    }
-    Some(ScanTarget::Folder(PathBuf::from(target)))
+    Some(ScanTarget::from_path(PathBuf::from(target)))
 }
 
-fn main() -> eframe::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    platzhirsch::ui::run(parse_args(&args))
+fn main() {
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    if let Err(e) = platzhirsch::ui::run(parse_args(&args)) {
+        // The release build has no console, so the error would go unseen.
+        platzhirsch::win::show_error("Platzhirsch", &format!("Platzhirsch could not start: {e}"));
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -33,6 +30,7 @@ mod tests {
     fn scan_argument_selects_volume_or_folder() {
         assert!(matches!(parse_args(&["--scan".into(), "C:".into()]), Some(ScanTarget::Volume('C'))));
         assert!(matches!(parse_args(&["--scan".into(), "c:\\".into()]), Some(ScanTarget::Volume('C'))));
+        assert!(matches!(parse_args(&["--scan".into(), "c:/".into()]), Some(ScanTarget::Volume('C'))));
         assert!(matches!(parse_args(&["--scan".into(), "C:\\DRIVE".into()]), Some(ScanTarget::Folder(_))));
         assert!(parse_args(&[]).is_none());
     }
