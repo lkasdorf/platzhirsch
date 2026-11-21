@@ -2,6 +2,7 @@
 name = "platzhirsch"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "Fast disk space analyzer for Windows that reads the NTFS Master File Table directly"
 license = "MIT"
 repository = "https://github.com/lkasdorf/platzhirsch"
