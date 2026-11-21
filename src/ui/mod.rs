@@ -1,6 +1,7 @@
 //! The main window: top bar, central area, status bar and the scan lifecycle.
 pub mod bars;
 pub mod rows;
+pub mod table;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::format::format_bytes;
 use crate::model::Metric;
 use crate::scan::mft::scan_mft;
 use crate::scan::walk::scan_walk;
@@ -243,10 +243,9 @@ impl App {
         }
     }
 
-    /// The area between the bars. For now the root and its total;
-    /// the table and the treemap replace this.
+    /// The area between the bars: a hint, a spinner or the tree table.
     fn central_area(&mut self, ui: &mut egui::Ui) {
-        match &self.phase {
+        match &mut self.phase {
             Phase::Idle => {
                 ui.centered_and_justified(|ui| ui.label(IDLE_HINT));
             }
@@ -254,10 +253,7 @@ impl App {
                 ui.centered_and_justified(|ui| ui.spinner());
             }
             Phase::Done { result, view, .. } => {
-                let tree = &result.tree;
-                let root = tree.root();
-                ui.heading(tree.name(root));
-                ui.label(format_bytes(tree.metric(root, view.metric())));
+                table::show(ui, &result.tree, view, None);
             }
             Phase::AskElevation(_) | Phase::Failed { .. } => {}
         }

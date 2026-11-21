@@ -32,3 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as administrator or the slow folder scan. If the fast scan fails, the error is shown and
   the slow scan is offered; the app never switches silently. `--scan X:` or
   `--scan <folder>` starts a scan right away.
+- Folder table after a scan: name, allocated space, size, files, folders, share of the
+  parent folder and last modification, with a bar behind each name for its share of the
+  parent. Click a column header to sort, click again to reverse. Folders expand and
+  collapse by arrow, double-click or arrow keys; only the visible rows are drawn. Marks
+  for unreadable, online-only and link entries. Right-click offers "Show in Explorer" and
+  "Copy path".
