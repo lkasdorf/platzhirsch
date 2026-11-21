@@ -164,6 +164,15 @@ pub fn apply_fixups(record: &mut [u8], block_size: usize) -> Result<(), NtfsErro
     Ok(())
 }
 
+/// Reads the in-use flag of a raw record, before or without [`apply_fixups`].
+///
+/// The flags at `0x16` lie in the first 512-byte block, before its protected
+/// last word, so fixups never change them: the answer does not depend on the
+/// fixups being intact. `false` if the record is too short to hold them.
+pub fn header_in_use(record: &[u8]) -> bool {
+    u16_at(record, 0x16).is_ok_and(|flags| flags & RECORD_IN_USE != 0)
+}
+
 /// Parses one MFT file record on which [`apply_fixups`] has succeeded.
 ///
 /// For a record that is not in use only the header fields are filled; its
@@ -641,6 +650,18 @@ mod tests {
     fn not_in_use() {
         let info = parse(RecordBuilder::new(1024).not_in_use().file_name(5, "gone", 1));
         assert!(!info.in_use);
+    }
+
+    #[test]
+    fn in_use_flag_without_fixups() {
+        let mut used = RecordBuilder::new(1024).file_name(5, "a", 1).build(512);
+        let mut free = RecordBuilder::new(1024).not_in_use().file_name(5, "a", 1).build(512);
+        used[510] ^= 0xFF;
+        free[510] ^= 0xFF;
+        assert_eq!(apply_fixups(&mut used.clone(), 512), Err(NtfsError::BadFixup));
+        assert!(header_in_use(&used));
+        assert!(!header_in_use(&free));
+        assert!(!header_in_use(&used[..0x17]));
     }
 
     #[test]

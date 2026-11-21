@@ -14,7 +14,9 @@ use rayon::prelude::*;
 
 use super::ntfs::NtfsError;
 use super::ntfs::boot::{BootSector, parse_boot_sector};
-use super::ntfs::record::{AttrListLoc, FIXUP_BLOCK_SIZE, apply_fixups, parse_attr_list, parse_record};
+use super::ntfs::record::{
+    AttrListLoc, FIXUP_BLOCK_SIZE, apply_fixups, header_in_use, parse_attr_list, parse_record,
+};
 use super::ntfs::runs::Run;
 use super::{Progress, ScanError, ScanMethod, ScanResult};
 use crate::model::{F_DIR, F_LINK, NO_PARENT, NodeId, TreeBuilder};
@@ -310,6 +312,11 @@ fn parse_slot(rec: &mut [u8], record_no: u64) -> (Slot, Option<String>) {
     if rec.get(0..4) != Some(b"FILE") {
         return (EMPTY, None);
     }
+    // A free record holds nothing, whatever its fixups look like (a torn
+    // write to a free record is not a lost file).
+    if !header_in_use(rec) {
+        return (EMPTY, None);
+    }
     let bad = (Slot { kind: KIND_BAD, ..EMPTY }, None);
     if apply_fixups(rec, FIXUP_BLOCK_SIZE).is_err() {
         return bad;
@@ -472,6 +479,7 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
             continue;
         };
         base.allocated = base.allocated.saturating_add(ext.allocated);
+        base.flags |= ext.flags & F_LINK;
         if base.flags & HAS_SIZE == 0 && ext.flags & HAS_SIZE != 0 {
             base.size = ext.size;
             base.flags |= HAS_SIZE;
@@ -501,7 +509,10 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
             node_of[i] = entries;
             entries += 1;
             name_bytes += usize::from(s.name_len);
-        } else {
+        } else if s.size > 0 || s.allocated > 0 {
+            // Data (extension records included) that belongs to no named
+            // file. A nameless record that holds nothing, such as a reserved
+            // system record, is no entry and loses nothing.
             skipped += 1;
         }
     }
@@ -559,7 +570,7 @@ mod tests {
 
     fn image() -> FakeVolume {
         // Record 1024 B, MFT at LCN 4, 8 clusters = 32 records
-        let mut broken = RecordBuilder::new(1024).file_name(5, "kaputt", 1).build(512);
+        let mut broken = RecordBuilder::new(1024).file_name(5, "broken", 1).build(512);
         broken[510] ^= 0xFF;
         fake_volume(
             1024,
@@ -613,6 +624,113 @@ mod tests {
         assert_eq!((t.size(docs), t.file_count(docs), t.mtime(docs)), (5100, 2, 900)); // hl2 is not counted here
         assert_eq!(progress.total.load(Ordering::Relaxed), 32);
         assert_eq!(progress.done.load(Ordering::Relaxed), 32);
+    }
+
+    const RUNS: &[u8] = &[0x21, 0x02, 0x40, 0x00, 0x00];
+
+    /// Scans a volume holding `$MFT` (record 0), the root (record 5) and `extra`.
+    fn scan_records(extra: Vec<(u64, Vec<u8>)>) -> ScanResult {
+        let mut records = vec![
+            (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                    .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+            (5, root_dir()),
+        ];
+        records.extend(extra);
+        scan_mft_from(&mut fake_volume(1024, &[(4, 8)], records), "C:", &Progress::default()).unwrap()
+    }
+
+    #[test]
+    fn nameless_empty_record_is_not_skipped() {
+        // like the reserved records 12-15 of a real volume: in use, no name, no data
+        let r = scan_records(vec![
+            (12, RecordBuilder::new(1024).std_info(1).build(512)),
+            (13, RecordBuilder::new(1024).std_info(1).data_resident("", 0).build(512)),
+        ]);
+        assert_eq!(r.skipped, 0);
+        assert_eq!(r.tree.len(), 2); // the root and $MFT
+    }
+
+    #[test]
+    fn nameless_record_with_data_is_skipped() {
+        let r = scan_records(vec![
+            (20, RecordBuilder::new(1024).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+            (21, RecordBuilder::new(1024).data_resident("", 100).build(512)),
+        ]);
+        assert_eq!(r.skipped, 2);
+    }
+
+    #[test]
+    fn nameless_record_with_data_in_extension_is_skipped() {
+        let r = scan_records(vec![
+            (20, RecordBuilder::new(1024).std_info(1).build(512)),
+            (21, RecordBuilder::new(1024).base(20).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+        ]);
+        assert_eq!(r.skipped, 1);
+    }
+
+    #[test]
+    fn free_record_with_bad_fixup_is_not_skipped() {
+        let mut torn = RecordBuilder::new(1024).not_in_use().file_name(5, "gone", 1).build(512);
+        torn[1022] ^= 0xFF;
+        let r = scan_records(vec![(20, torn)]);
+        assert_eq!(r.skipped, 0);
+    }
+
+    #[test]
+    fn used_record_with_bad_fixup_is_skipped() {
+        let mut torn = RecordBuilder::new(1024).file_name(5, "torn", 1).build(512);
+        torn[1022] ^= 0xFF;
+        let r = scan_records(vec![(20, torn)]);
+        assert_eq!(r.skipped, 1);
+        assert!(child(&r.tree, r.tree.root(), "torn").is_none());
+    }
+
+    #[test]
+    fn extension_record_before_its_base() {
+        let r = scan_records(vec![
+            (20, RecordBuilder::new(1024).base(21).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+            (21, RecordBuilder::new(1024).file_name(5, "late.bin", 1).build(512)),
+        ]);
+        let t = &r.tree;
+        let late = child(t, t.root(), "late.bin").expect("late.bin");
+        assert_eq!((t.size(late), t.allocated(late)), (5000, 8192));
+        assert_eq!(t.file_count(t.root()), 2);
+        assert_eq!(r.skipped, 0);
+    }
+
+    #[test]
+    fn name_only_in_extension_record() {
+        let r = scan_records(vec![
+            (20, RecordBuilder::new(1024).std_info(7).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+            (21, RecordBuilder::new(1024).base(20).file_name(5, "named.bin", 1).build(512)),
+        ]);
+        let t = &r.tree;
+        let named = child(t, t.root(), "named.bin").expect("named.bin");
+        assert_eq!((t.size(named), t.allocated(named), t.mtime(named)), (5000, 8192, 7));
+        assert_eq!(t.file_count(t.root()), 2);
+        assert_eq!(r.skipped, 0);
+    }
+
+    #[test]
+    fn extension_record_with_invalid_base_is_skipped_once() {
+        // record 20 is empty, so the extension belongs to no file
+        let r = scan_records(vec![
+            (21, RecordBuilder::new(1024).base(20).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+        ]);
+        assert_eq!(r.skipped, 1);
+        assert_eq!(r.tree.len(), 2);
+    }
+
+    #[test]
+    fn link_flag_from_extension_record() {
+        let r = scan_records(vec![
+            (20, RecordBuilder::new(1024).dir().file_name(5, "junction", 1).build(512)),
+            (21, RecordBuilder::new(1024).base(20).reparse(0xA000_0003).build(512)),
+        ]);
+        let t = &r.tree;
+        let j = child(t, t.root(), "junction").expect("junction");
+        assert_ne!(t.flags(j) & F_LINK, 0);
+        assert_ne!(t.flags(j) & F_DIR, 0);
     }
 
     #[test]
