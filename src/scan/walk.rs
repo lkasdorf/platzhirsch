@@ -13,14 +13,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Instant;
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_BOTH_DIR_INFO,
-    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdBothDirectoryInfo,
-    GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
+use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows::Wdk::Storage::FileSystem::{
+    FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    NtOpenFile,
 };
-use windows::core::PCWSTR;
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
+    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdBothDirectoryInfo,
+    GetFileAttributesW, GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, SYNCHRONIZE,
+};
+use windows::Win32::System::IO::IO_STATUS_BLOCK;
+use windows::core::{PCWSTR, PWSTR};
 
 use super::{Progress, ScanError, ScanMethod, ScanResult};
 use crate::model::{F_DIR, F_LINK, F_ONLINE_ONLY, F_UNREADABLE, NO_PARENT, NodeId, TreeBuilder};
@@ -147,30 +154,77 @@ impl Drop for DirHandle {
     }
 }
 
+/// The NT form (`\??\…`) of a `\\?\` or `\\.\` path.
+fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
+    let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    if !path.starts_with(&wide(r"\\?\")) && !path.starts_with(&wide(r"\\.\")) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Pfad ohne \\\\?\\-Präfix"));
+    }
+    let mut nt = wide(r"\??\");
+    nt.extend_from_slice(&path[4..]);
+    Ok(nt)
+}
+
 /// Opens a directory with list access only. `path` has no trailing NUL.
 /// Without `follow`, a reparse point is opened itself instead of its target.
+///
+/// `FILE_DIRECTORY_FILE` makes the file system refuse the open with
+/// `STATUS_NOT_A_DIRECTORY` if the object is not a directory, so no handle
+/// to a file is ever created, even if a directory was replaced by a file
+/// since it was listed. (`FILE_LIST_DIRECTORY` has the same bit as read-data
+/// access on files, which is why this matters.)
 fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
+    let nt = nt_path(path)?;
+    let bytes = u16::try_from(nt.len() * 2)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Pfad zu lang"))?;
+    // The buffer is only read; the binding's type is `PWSTR` nonetheless.
+    let name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: PWSTR(nt.as_ptr().cast_mut()) };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut options = FILE_DIRECTORY_FILE.0 | FILE_SYNCHRONOUS_IO_NONALERT.0 | FILE_OPEN_FOR_BACKUP_INTENT.0;
+    if !follow {
+        options |= FILE_OPEN_REPARSE_POINT.0;
+    }
+    let mut handle = HANDLE::default();
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: all pointers point to live locals; `name` and `nt` outlive the call.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            (FILE_LIST_DIRECTORY | SYNCHRONIZE).0,
+            &attributes,
+            &mut iosb,
+            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
+            options,
+        )
+    };
+    if status.0 < 0 {
+        // SAFETY: plain value conversion without pointers.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    Ok(DirHandle(handle))
+}
+
+/// Fails with `NotADirectory` if `path` (verbatim, no NUL) is not a directory.
+/// Reads the attributes only; the object is not opened for any data access.
+fn ensure_directory(path: &[u16]) -> io::Result<()> {
     let mut z = Vec::with_capacity(path.len() + 1);
     z.extend_from_slice(path);
     z.push(0);
-    let mut flags: FILE_FLAGS_AND_ATTRIBUTES = FILE_FLAG_BACKUP_SEMANTICS;
-    if !follow {
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    // SAFETY: `z` is NUL-terminated and outlives the call.
+    let attributes = unsafe { GetFileAttributesW(PCWSTR(z.as_ptr())) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
     }
-    // SAFETY: `z` is NUL-terminated and outlives the call; no security attributes or template are passed.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(z.as_ptr()),
-            (FILE_LIST_DIRECTORY | SYNCHRONIZE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            flags,
-            None,
-        )
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err(io::Error::new(io::ErrorKind::NotADirectory, "der Pfad ist kein Ordner"));
     }
-    .map_err(to_io)?;
-    Ok(DirHandle(handle))
+    Ok(())
 }
 
 enum Listing {
@@ -324,6 +378,7 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     progress.done.store(0, Ordering::Relaxed);
     progress.total.store(0, Ordering::Relaxed);
     let root_path = verbatim_path(root).map_err(scan_error)?;
+    ensure_directory(&root_path).map_err(scan_error)?;
     let given = root.as_os_str().to_string_lossy();
     let trimmed = given.trim_end_matches(['\\', '/']);
     let root_name = if trimmed.is_empty() { &*given } else { trimmed };
@@ -489,6 +544,26 @@ mod tests {
         let mut odd = buf.clone();
         odd[OFF_NAME_LEN..][..4].copy_from_slice(&5u32.to_le_bytes());
         assert!(parse_records(&odd, &mut out).is_err());
+    }
+
+    #[test]
+    fn nt_prefix() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(nt_path(&w(r"\\?\C:\x")).unwrap(), w(r"\??\C:\x"));
+        assert_eq!(nt_path(&w(r"\\?\UNC\nas\share")).unwrap(), w(r"\??\UNC\nas\share"));
+        assert!(nt_path(&w(r"C:\x")).is_err());
+    }
+
+    #[test]
+    fn open_dir_refuses_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        for follow in [true, false] {
+            let err = open_dir(&verbatim_path(&file).unwrap(), follow).err().expect("file was opened");
+            assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+            assert!(open_dir(&verbatim_path(tmp.path()).unwrap(), follow).is_ok());
+        }
     }
 
     #[test]

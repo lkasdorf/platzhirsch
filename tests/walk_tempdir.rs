@@ -88,6 +88,58 @@ fn cancel() {
 }
 
 #[test]
+fn cancel_while_walking() {
+    // 20 chains of 25 nested directories: 500 directories, mostly listed one
+    // after another, so the walk runs long enough for the cancel to land.
+    let tmp = tempfile::tempdir().unwrap();
+    for chain in 0..20 {
+        let mut p = tmp.path().join(format!("c{chain}"));
+        for depth in 0..25 {
+            p.push(format!("d{depth}"));
+        }
+        fs::create_dir_all(&p).unwrap();
+        write_file(&p.join("f"), 1);
+    }
+    let limit = std::time::Duration::from_secs(10);
+    let mut cancelled = false;
+    for _attempt in 0..5 {
+        let progress = Progress::default();
+        let started = std::time::Instant::now();
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                while progress.done.load(Ordering::Relaxed) == 0 && started.elapsed() < limit {
+                    std::hint::spin_loop();
+                }
+                progress.cancel.store(true, Ordering::Relaxed);
+            });
+            scan_walk(tmp.path(), &progress)
+        });
+        assert!(started.elapsed() < limit, "scan did not return in time");
+        match result {
+            Err(ScanError::Cancelled) => {
+                cancelled = true;
+                break;
+            }
+            // The walk won the race; try again.
+            Ok(_) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert!(cancelled, "the walk never saw the cancel");
+}
+
+#[test]
+fn file_root_is_not_opened() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("datei.txt");
+    write_file(&file, 10);
+    match scan_walk(&file, &Progress::default()) {
+        Err(ScanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory),
+        other => panic!("expected Io(NotADirectory), got {:?}", other.err()),
+    }
+}
+
+#[test]
 fn missing_root() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("gibt_es_nicht");
