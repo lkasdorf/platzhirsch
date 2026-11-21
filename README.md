@@ -8,8 +8,8 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
 1.87 million entries takes 2.1 seconds.
 
 > **Status:** in development. Version 0.1.0 is being built on the `v1` branch and has not
-> been released yet. The scanners are finished and measured; the main window shows the
-> scan result as a folder table, and the treemap view is still in progress. See the
+> been released yet. The scanners are finished and measured, and the user interface for
+> 0.1.0 is complete: a folder table with a treemap below it. See the
 > [changelog](CHANGELOG.md) for what exists today.
 
 ## What it does
@@ -26,6 +26,9 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
 - **Folder table** with a share bar per entry, sorting by any column, keyboard
   navigation, and "Show in Explorer" / "Copy path" on right-click. Only the visible rows
   are drawn.
+- **Treemap** of the folder selected in the table, coloured by level. Hover for path and
+  size, click a tile to select it in the table. The divider can be dragged and the
+  treemap can be hidden.
 - **A single .exe**, no installer, no runtime to install.
 
 ## What it never does

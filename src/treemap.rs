@@ -23,16 +23,23 @@ pub struct Tile {
 
 /// Tiles narrower or lower than this are not subdivided further.
 pub const MIN_TILE_PX: f32 = 4.0;
-/// Space for the folder name, reserved when the tile is at least 40x28 px.
+/// Space for the folder name, reserved when the tile is at least
+/// `HEADER_MIN_W` x `HEADER_MIN_H` px.
 pub const HEADER_PX: f32 = 14.0;
+pub const HEADER_MIN_W: f32 = 40.0;
+pub const HEADER_MIN_H: f32 = 28.0;
 pub const PAD_PX: f32 = 1.0;
+/// Tiles whose smaller side is below this are not emitted; their parent's
+/// area stays unsubdivided there.
+pub const MIN_SIDE_PX: f32 = 1.0;
 
 pub fn layout(tree: &Tree, root: NodeId, metric: Metric, bounds: Rect) -> Vec<Tile> {
     layout_with(tree, root, metric, bounds, HEADER_PX, PAD_PX)
 }
 
 /// Squarified layout. Order: parents before children; the first tile is
-/// `root` itself (depth 0, all of `bounds`). Entries with value 0 get no tile.
+/// `root` itself (depth 0, all of `bounds`). Entries with value 0 get no tile,
+/// nor do entries whose tile would be thinner than [`MIN_SIDE_PX`].
 pub fn layout_with(
     tree: &Tree,
     root: NodeId,
@@ -64,7 +71,7 @@ pub fn layout_with(
             w: f64::from(p.rect.w) - 2.0 * pad,
             h: f64::from(p.rect.h) - 2.0 * pad,
         };
-        if p.rect.w >= 40.0 && p.rect.h >= 28.0 {
+        if p.rect.w >= HEADER_MIN_W && p.rect.h >= HEADER_MIN_H {
             area.y += header;
             area.h -= header;
         }
@@ -112,6 +119,11 @@ fn squarify(
     let mut remaining = total;
     let mut i = 0;
     while i < kids.len() && w > 0.0 && h > 0.0 {
+        // Every tile placed in the rest of the area is at most `min(w, h)`
+        // across, so once that is below the cut-off no further tile is emitted.
+        if w.min(h) < f64::from(MIN_SIDE_PX) {
+            break;
+        }
         let scale = w * h / remaining as f64; // pixels² per unit of value
         let side = w.min(h);
         let largest = kids[i].1 as f64 * scale;
@@ -160,6 +172,9 @@ fn squarify(
                 F64Rect { x: x + offset, y, w: len, h: thick }
             };
             offset += len;
+            if r.w.min(r.h) < f64::from(MIN_SIDE_PX) {
+                continue;
+            }
             let tile = Tile {
                 node,
                 rect: Rect { x: r.x as f32, y: r.y as f32, w: r.w as f32, h: r.h as f32 },
@@ -318,6 +333,20 @@ mod tests {
         assert!(by_alloc.iter().all(|x| x.node != 3)); // Small.txt: allocated 0
         let big = |tiles: &[Tile]| tiles.iter().find(|x| x.node == 2).unwrap().rect;
         assert_ne!(big(&by_size), big(&by_alloc));
+    }
+
+    #[test]
+    fn sub_pixel_tiles_are_not_emitted() {
+        // One big file and 100,000 tiny ones: each tiny one would be far below 1 px.
+        let mut sizes = vec![1_000_000_000];
+        sizes.extend(std::iter::repeat_n(1, 100_000));
+        let t = flat(&sizes);
+        let tiles = layout_with(&t, 0, Metric::Size, rect(200.0, 100.0), 0.0, 0.0);
+        assert!(tiles.iter().any(|x| x.node == 1), "the big file keeps its tile");
+        assert!(tiles.len() < 100, "{} tiles", tiles.len());
+        for tile in &tiles {
+            assert!(tile.rect.w.min(tile.rect.h) >= MIN_SIDE_PX, "node {}: {:?}", tile.node, tile.rect);
+        }
     }
 
     #[test]

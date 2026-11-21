@@ -2,6 +2,7 @@
 pub mod bars;
 pub mod rows;
 pub mod table;
+pub mod treemap_view;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,10 +20,16 @@ use crate::scan::{MethodChoice, Progress, ScanError, ScanMethod, ScanResult, Sca
 use crate::win::{self, VolumeInfo};
 use bars::Action;
 use rows::TreeView;
+use treemap_view::TreemapCache;
 
 const IDLE_HINT: &str = "Choose a drive and press \"Scan\".";
 /// How often the window redraws while a scan runs.
 const SCAN_REPAINT: Duration = Duration::from_millis(250);
+/// Height of the treemap area until the user drags the divider.
+const TREEMAP_HEIGHT: f32 = 260.0;
+const TREEMAP_MIN_HEIGHT: f32 = 60.0;
+/// Room the divider always leaves for the table.
+const TABLE_MIN_HEIGHT: f32 = 80.0;
 
 /// What the scan thread sends back: the result and, for a volume, its fresh space figures.
 type ScanOutcome = (Result<ScanResult, ScanError>, Option<VolumeInfo>);
@@ -42,6 +49,8 @@ pub enum Phase {
     Done {
         result: Arc<ScanResult>,
         view: TreeView,
+        /// Belongs to this result only: a new scan starts with an empty cache.
+        treemap: TreemapCache,
         /// Re-read after the scan when the target was a volume.
         volume: Option<VolumeInfo>,
     },
@@ -174,7 +183,7 @@ impl App {
             }
             Ok((Ok(result), info)) => {
                 let view = TreeView::new(&result.tree, self.metric);
-                Phase::Done { result: Arc::new(result), view, volume: info }
+                Phase::Done { result: Arc::new(result), view, treemap: TreemapCache::default(), volume: info }
             }
             Ok((Err(ScanError::Cancelled), _)) => Phase::Idle,
             Ok((Err(e), _)) => match (method, volume) {
@@ -243,8 +252,10 @@ impl App {
         }
     }
 
-    /// The area between the bars: a hint, a spinner or the tree table.
+    /// The area between the bars: a hint, a spinner or the tree table with
+    /// the treemap below it.
     fn central_area(&mut self, ui: &mut egui::Ui) {
+        let show_treemap = self.show_treemap;
         match &mut self.phase {
             Phase::Idle => {
                 ui.centered_and_justified(|ui| ui.label(IDLE_HINT));
@@ -252,8 +263,24 @@ impl App {
             Phase::Scanning { .. } => {
                 ui.centered_and_justified(|ui| ui.spinner());
             }
-            Phase::Done { result, view, .. } => {
-                table::show(ui, &result.tree, view, None);
+            Phase::Done { result, view, treemap, .. } => {
+                let tree = &result.tree;
+                let mut scroll_to = None;
+                if show_treemap {
+                    // Drawn first so the table gets the rest of the height.
+                    let clicked = egui::Panel::bottom("treemap_panel")
+                        .resizable(true)
+                        .default_size(TREEMAP_HEIGHT)
+                        .min_size(TREEMAP_MIN_HEIGHT)
+                        .max_size((ui.available_height() - TABLE_MIN_HEIGHT).max(TREEMAP_MIN_HEIGHT))
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 4, ..egui::Margin::ZERO }))
+                        .show(ui, |ui| treemap_view::show(ui, tree, view, treemap))
+                        .inner;
+                    if let Some(node) = clicked {
+                        scroll_to = Some(view.reveal(tree, node));
+                    }
+                }
+                table::show(ui, tree, view, scroll_to);
             }
             Phase::AskElevation(_) | Phase::Failed { .. } => {}
         }
@@ -349,7 +376,7 @@ mod tests {
             unreadable: 0,
             online_only: 0,
         };
-        Phase::Done { result: Arc::new(result), view, volume: None }
+        Phase::Done { result: Arc::new(result), view, treemap: TreemapCache::default(), volume: None }
     }
 
     #[test]

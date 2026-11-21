@@ -38,3 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapse by arrow, double-click or arrow keys; only the visible rows are drawn. Marks
   for unreadable, online-only and link entries. Right-click offers "Show in Explorer" and
   "Copy path".
+- Treemap below the table: shows the folder selected in the table as nested tiles,
+  coloured by level. Hovering shows the path and size of a tile; clicking a tile selects
+  the entry in the table and scrolls to it. The divider to the table can be dragged, and
+  the "Treemap" switch hides it. The layout is recomputed only when the folder, the
+  metric or the size changes; tiles thinner than one pixel are left out.
