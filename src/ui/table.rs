@@ -135,7 +135,8 @@ fn header_cell(header: &mut TableRow<'_, '_>, col: Col, title: &str, sorted: Opt
 /// What the user did with the rows this frame; applied after drawing.
 #[derive(Default)]
 struct RowInput {
-    select: Option<NodeId>,
+    /// Row index to select.
+    select: Option<usize>,
     toggle: Option<NodeId>,
 }
 
@@ -262,7 +263,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
 
                     let response = row.response();
                     if response.clicked() || response.secondary_clicked() {
-                        input.select = Some(node);
+                        input.select = Some(row.index());
                     }
                     if response.double_clicked() && is_dir {
                         input.toggle = Some(node);
@@ -281,12 +282,13 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
             });
     });
 
+    // The row index belongs to the rows drawn this frame, so select before re-sorting.
+    if let Some(index) = input.select {
+        view.select_row(index);
+    }
     if let Some(key) = header_click {
         let (key, desc) = next_sort((sort_key, desc), key);
         view.set_sort(tree, key, desc);
-    }
-    if let Some(node) = input.select {
-        view.selected = node;
     }
     if let Some(node) = input.toggle {
         view.toggle(tree, node);

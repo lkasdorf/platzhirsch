@@ -25,6 +25,8 @@ pub enum NavKey {
 }
 
 pub struct TreeView {
+    /// The selected node. Read only: callers must not assign it, but use
+    /// `select_row` or `reveal`, which keep the row index in step.
     pub selected: NodeId,
     metric: Metric,
     sort_key: SortKey,
@@ -167,9 +169,12 @@ impl TreeView {
         self.selected_row
     }
 
-    fn select_row(&mut self, index: usize) {
-        self.selected = self.rows[index].node;
-        self.selected_row = index;
+    /// Selects the row at `index`; an index out of range changes nothing.
+    pub fn select_row(&mut self, index: usize) {
+        if let Some(row) = self.rows.get(index) {
+            self.selected = row.node;
+            self.selected_row = index;
+        }
     }
 
     /// True if `node` lies strictly below `ancestor`.
@@ -336,6 +341,39 @@ mod tests {
         assert_eq!(v.key_nav(&t, NavKey::Right), 2); // file: nothing
         assert_eq!(v.key_nav(&t, NavKey::Down), 2);
         assert_eq!(v.key_nav(&t, NavKey::Left), 0); // parent
+    }
+
+    #[test]
+    fn select_row_then_down_moves_from_that_row() {
+        let t = sample();
+        let mut v = TreeView::new(&t, Metric::Allocated);
+        v.toggle(&t, 1); // rows: 0, 1, 4, 2, 3, 6
+        v.select_row(4);
+        assert_eq!(v.selected, 3);
+        assert_eq!(v.key_nav(&t, NavKey::Down), 5);
+        assert_eq!(v.selected, v.rows()[5].node);
+    }
+
+    #[test]
+    fn select_row_on_file_then_left_selects_its_parent() {
+        let t = sample();
+        let mut v = TreeView::new(&t, Metric::Allocated);
+        v.toggle(&t, 1); // rows: 0, 1, 4, 2, 3, 6
+        v.select_row(5); // top.txt, parent is the root
+        v.select_row(3); // big.bin, parent is a
+        assert_eq!(v.selected, 2);
+        assert_eq!(v.key_nav(&t, NavKey::Left), 1);
+        assert_eq!(v.selected, 1);
+    }
+
+    #[test]
+    fn select_row_out_of_range_changes_nothing() {
+        let t = sample();
+        let mut v = TreeView::new(&t, Metric::Allocated);
+        v.key_nav(&t, NavKey::Down);
+        v.select_row(usize::MAX);
+        assert_eq!(v.selected, 1);
+        assert_eq!(v.key_nav(&t, NavKey::Down), 2);
     }
 
     #[test]
