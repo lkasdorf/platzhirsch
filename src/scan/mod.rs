@@ -20,6 +20,24 @@ pub enum ScanMethod {
     Walk,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum MethodChoice {
+    Mft,
+    Walk,
+    /// The MFT would work, but only with admin rights.
+    AskElevation,
+}
+
+/// Picks the scan method: the MFT for whole NTFS volumes, the walk otherwise.
+pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str) -> MethodChoice {
+    match target {
+        ScanTarget::Folder(_) => MethodChoice::Walk,
+        ScanTarget::Volume(_) if !fs_name.eq_ignore_ascii_case("NTFS") => MethodChoice::Walk,
+        ScanTarget::Volume(_) if elevated => MethodChoice::Mft,
+        ScanTarget::Volume(_) => MethodChoice::AskElevation,
+    }
+}
+
 /// Shared between the scanner and the GUI. `total == 0` means unknown.
 #[derive(Default)]
 pub struct Progress {
@@ -69,5 +87,23 @@ impl fmt::Display for ScanError {
                 write!(f, "NTFS-Daten fehlerhaft: {detail}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn method_choice() {
+        let vol = ScanTarget::Volume('C');
+        let dir = ScanTarget::Folder("C:\\DRIVE".into());
+        assert_eq!(choose_method(&vol, true, "NTFS"), MethodChoice::Mft);
+        assert_eq!(choose_method(&vol, false, "NTFS"), MethodChoice::AskElevation);
+        assert_eq!(choose_method(&vol, true, "exFAT"), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, false, "FAT32"), MethodChoice::Walk);
+        assert_eq!(choose_method(&dir, true, "NTFS"), MethodChoice::Walk);
+        assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, ""), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, true, "ntfs"), MethodChoice::Mft);
     }
 }

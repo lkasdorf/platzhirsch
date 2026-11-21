@@ -536,6 +536,16 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
     })
 }
 
+/// Scans the NTFS volume `drive` (e.g. `'c'`) through its MFT. Needs admin rights.
+pub fn scan_mft(drive: char, progress: &Progress) -> Result<ScanResult, ScanError> {
+    let mut volume = crate::win::RawVolume::open(drive).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => ScanError::AccessDenied,
+        _ => ScanError::Io(e),
+    })?;
+    let root_name = format!("{}:", drive.to_ascii_uppercase());
+    scan_mft_from(&mut volume, &root_name, progress)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +723,14 @@ mod tests {
             scan_mft_from(&mut v, "C:", &Progress::default()),
             Err(ScanError::Ntfs(NtfsError::Malformed(_)))
         ));
+    }
+
+    #[test]
+    fn real_volume_needs_elevation() {
+        // cargo test runs without admin rights
+        assert!(
+            matches!(scan_mft('C', &Progress::default()), Err(ScanError::AccessDenied)) || crate::win::is_elevated()
+        );
     }
 
     #[test]

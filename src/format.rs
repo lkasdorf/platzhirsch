@@ -56,6 +56,11 @@ pub fn format_ymd(y: u16, m: u8, d: u8) -> String {
     format!("{d:02}.{m:02}.{y:04}")
 }
 
+/// Formats a FILETIME as a local `DD.MM.YYYY`; empty if it is not a valid time.
+pub fn format_date(ft: i64) -> String {
+    crate::win::filetime_to_local_ymd(ft).map_or_else(String::new, |(y, m, d)| format_ymd(y, m, d))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +95,12 @@ mod tests {
     #[test]
     fn date_is_day_month_year() {
         assert_eq!(format_ymd(2026, 11, 21), "21.11.2026");
+    }
+
+    #[test]
+    fn filetime_is_formatted_as_local_date() {
+        const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
+        assert_eq!(format_date(UNIX_EPOCH_FT + 1_795_262_400 * 10_000_000), "21.11.2026"); // 21.11.2026 12:00 UTC
+        assert_eq!(format_date(0), "");
     }
 }
