@@ -142,7 +142,7 @@ fn file_root_is_not_opened() {
 #[test]
 fn missing_root() {
     let tmp = tempfile::tempdir().unwrap();
-    let missing = tmp.path().join("gibt_es_nicht");
+    let missing = tmp.path().join("does_not_exist");
     assert!(matches!(scan_walk(&missing, &Progress::default()), Err(ScanError::Io(_))));
 }
 

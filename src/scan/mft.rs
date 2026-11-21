@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_are_german() {
+    fn messages_are_english() {
         let e = ScanError::MftIncomplete { found_bytes: 1, expected_bytes: 2 };
         assert_eq!(e.to_string(), "MFT incomplete: found 1 of 2 bytes");
         assert_eq!(ScanError::Cancelled.to_string(), "Scan cancelled");
