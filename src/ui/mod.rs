@@ -72,6 +72,24 @@ fn volume_letter(target: &ScanTarget) -> Option<char> {
     }
 }
 
+fn same_target(a: &ScanTarget, b: &ScanTarget) -> bool {
+    match (a, b) {
+        (ScanTarget::Volume(x), ScanTarget::Volume(y)) => x == y,
+        (ScanTarget::Folder(x), ScanTarget::Folder(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The phase after the selected target changes from `old` to `new`: the elevation
+/// hint and an error belong to the old target and go back to `Idle`.
+fn after_target_change(phase: Phase, old: Option<&ScanTarget>, new: &ScanTarget) -> Phase {
+    let changed = !old.is_some_and(|old| same_target(old, new));
+    match phase {
+        Phase::AskElevation(_) | Phase::Failed { .. } if changed => Phase::Idle,
+        other => other,
+    }
+}
+
 pub(crate) struct App {
     volumes: Vec<VolumeInfo>,
     target: Option<ScanTarget>,
@@ -169,6 +187,12 @@ impl App {
         };
     }
 
+    fn set_target(&mut self, target: ScanTarget) {
+        let phase = std::mem::replace(&mut self.phase, Phase::Idle);
+        self.phase = after_target_change(phase, self.target.as_ref(), &target);
+        self.target = Some(target);
+    }
+
     /// Takes over the folder chosen in the dialog.
     fn poll_folder(&mut self) {
         let Some(rx) = &self.folder_rx else { return };
@@ -176,7 +200,7 @@ impl App {
             Err(TryRecvError::Empty) => {}
             Ok(picked) => {
                 if let Some(path) = picked {
-                    self.target = Some(ScanTarget::Folder(path));
+                    self.set_target(ScanTarget::Folder(path));
                 }
                 self.folder_rx = None;
             }
@@ -198,7 +222,7 @@ impl App {
 
     fn apply(&mut self, action: Action, ctx: &egui::Context, frame: &eframe::Frame) {
         match action {
-            Action::SelectVolume(letter) => self.target = Some(ScanTarget::Volume(letter)),
+            Action::SelectVolume(letter) => self.set_target(ScanTarget::Volume(letter)),
             Action::PickFolder => self.pick_folder(ctx, frame),
             Action::Scan => self.scan(ctx),
             Action::Cancel => self.cancel_scan(),
@@ -309,4 +333,51 @@ pub fn run(initial: Option<ScanTarget>) -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{F_DIR, NO_PARENT, TreeBuilder};
+
+    fn done_phase() -> Phase {
+        let mut b = TreeBuilder::with_capacity(1, 2);
+        let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR);
+        let (tree, _) = b.finish(root);
+        let view = TreeView::new(&tree, Metric::Allocated);
+        let result = ScanResult {
+            tree,
+            method: ScanMethod::Walk,
+            duration: Duration::ZERO,
+            skipped: 0,
+            unreadable: 0,
+            online_only: 0,
+        };
+        Phase::Done { result: Arc::new(result), view, volume: None }
+    }
+
+    #[test]
+    fn elevation_hint_is_dropped_for_another_drive() {
+        let next = after_target_change(Phase::AskElevation('C'), Some(&ScanTarget::Volume('C')), &ScanTarget::Volume('F'));
+        assert!(matches!(next, Phase::Idle));
+    }
+
+    #[test]
+    fn error_is_dropped_when_a_folder_is_picked() {
+        let failed = Phase::Failed { message: "x".into(), offer_walk: Some(ScanTarget::Volume('C')) };
+        let next = after_target_change(failed, Some(&ScanTarget::Volume('C')), &ScanTarget::Folder(r"D:\x".into()));
+        assert!(matches!(next, Phase::Idle));
+    }
+
+    #[test]
+    fn same_drive_again_keeps_the_hint() {
+        let next = after_target_change(Phase::AskElevation('C'), Some(&ScanTarget::Volume('C')), &ScanTarget::Volume('C'));
+        assert!(matches!(next, Phase::AskElevation('C')));
+    }
+
+    #[test]
+    fn finished_scan_stays_when_another_drive_is_chosen() {
+        let next = after_target_change(done_phase(), Some(&ScanTarget::Volume('C')), &ScanTarget::Volume('F'));
+        assert!(matches!(next, Phase::Done { .. }));
+    }
 }
