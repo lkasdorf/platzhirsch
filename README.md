@@ -43,10 +43,10 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
   file contents are never opened.
 - It has no network access: no telemetry, no update check, no advertising.
 
-Two guard tests in `tests/anti_goals.rs` back this up. One fails if a call from a list of
-write, delete and network functions appears in the source; the other fails if a known
-network library appears among the dependencies. They are tripwires against an accidental
-change, not a proof.
+Guard tests in `tests/anti_goals.rs` back this up. They fail if a call from a list of
+write, delete and network functions appears in the source, if a networking feature of the
+Windows bindings is enabled, or if a known network library appears among the
+dependencies. They are tripwires against an accidental change, not a proof.
 
 ## Measured
 
@@ -122,6 +122,9 @@ The design document and the implementation plan are in
 - Very small files that NTFS stores inside the Master File Table count as 0 allocated,
   and the space folders need for their own index is not counted. This is why the
   allocated total of a drive is slightly below its used space.
+- A cloud folder that is not on this machine is refused as a scan target. The check
+  looks at the chosen folder itself. It does not catch a link that points into such a
+  folder, and it is skipped when the folder's parent cannot be listed.
 - The drive list is read once when the program starts. A drive plugged in later appears
   after a restart.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it

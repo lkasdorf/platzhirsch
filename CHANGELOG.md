@@ -18,14 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder count and latest modification.
 - Flags instead of silently wrong numbers: unreadable folders and online-only cloud
   folders are marked in the table and counted in the status bar. Links (junctions and
-  symbolic links) are marked and never followed. Scanning a cloud folder that is not on
-  this machine is refused with a message, so the scan never makes a provider download it.
+  symbolic links) are marked and never followed. A cloud folder that is not on this
+  machine is refused as a scan target with a message, and such folders inside a scan are
+  not entered.
 - Squarified treemap layout as the basis for the area view.
 - Formatting of sizes, counts, percentages and dates.
 - Diagnostic program `bench` that measures scan duration, memory use and the deviation
   from the drive's used space. It is not shipped.
 - Guard tests that fail if a call from a list of write, delete and network functions
-  appears in the source, or a known network library among the dependencies.
+  appears in the source, a networking feature of the Windows bindings is enabled, or a
+  known network library appears among the dependencies.
 - A single executable with the C runtime linked statically: no installer and no
   Visual C++ redistributable needed.
 - Main window with a drive list, folder picker, scan and cancel buttons, a switch between
