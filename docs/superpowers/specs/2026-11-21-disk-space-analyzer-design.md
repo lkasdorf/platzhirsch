@@ -26,7 +26,8 @@ Focus **[Leon]**: first of all a fast scanner, plus a lean interface.
    most 10 seconds.
 2. **Lean interface.** One window: bar at the top, folder tree as a table, treemap below it,
    status line. No ribbons, no chains of dialogs.
-3. **A single .exe**, no installer, no runtime dependency. Target value **[Proposal]**: at
+3. **A single .exe**, no installer, no runtime dependency (the C runtime is linked
+   statically, so no Visual C++ redistributable is needed). Target value **[Proposal]**: at
    most 15 MB.
 4. **Also works without admin rights**, then slower (fallback path).
 5. **Smooth operation** even with 2 million entries: scrolling and expanding without

@@ -16,22 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network paths and non-NTFS drives. "Allocated" is an approximation in this mode.
 - In-memory folder tree with totals per folder for size, allocated space, file count,
   folder count and latest modification.
-- Flags instead of silently wrong numbers: unreadable folders, links (junctions and
-  symbolic links) and online-only cloud folders are marked and counted. Links are never
-  followed.
+- Flags instead of silently wrong numbers: unreadable folders and online-only cloud
+  folders are marked in the table and counted in the status bar. Links (junctions and
+  symbolic links) are marked and never followed. Scanning a cloud folder that is not on
+  this machine is refused with a message, so the scan never makes a provider download it.
 - Squarified treemap layout as the basis for the area view.
 - Formatting of sizes, counts, percentages and dates.
 - Diagnostic program `bench` that measures scan duration, memory use and the deviation
   from the drive's used space. It is not shipped.
-- Guard tests that forbid write access to scanned drives and network libraries in the
-  code.
+- Guard tests that fail if a call from a list of write, delete and network functions
+  appears in the source, or a known network library among the dependencies.
+- A single executable with the C runtime linked statically: no installer and no
+  Visual C++ redistributable needed.
 - Main window with a drive list, folder picker, scan and cancel buttons, a switch between
   allocated space and size, and a status bar with free space, file count, scan method and
   duration. The scan runs in the background and shows its progress.
 - Choice of scan method per drive: without administrator rights the app offers a restart
   as administrator or the slow folder scan. If the fast scan fails, the error is shown and
   the slow scan is offered; the app never switches silently. `--scan X:` or
-  `--scan <folder>` starts a scan right away.
+  `--scan <folder>` starts a scan right away. A drive chosen through "Folder…" is treated
+  like a drive chosen from the list.
+- If the window cannot be created, for example without OpenGL 2, a message box says why.
 - Folder table after a scan: name, allocated space, size, files, folders, share of the
   parent folder and last modification, with a bar behind each name for its share of the
   parent. Click a column header to sort, click again to reverse. Folders expand and

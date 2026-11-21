@@ -26,9 +26,9 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
   folders, network paths and drives that are not NTFS.
 - **Size and allocated space** per folder, plus file count, folder count and the latest
   modification in the subtree.
-- **Honest numbers:** folders that could not be read, links (junctions and symbolic
-  links) and online-only cloud folders are marked and counted, never shown silently as
-  0 bytes. Links are never followed.
+- **Honest numbers:** folders that could not be read and online-only cloud folders are
+  marked in the table and counted in the status bar, never shown silently as 0 bytes.
+  Links (junctions and symbolic links) are marked and never followed.
 - **Folder table** with a share bar per entry, sorting by any column, keyboard
   navigation, and "Show in Explorer" / "Copy path" on right-click. Only the visible rows
   are drawn.
@@ -43,8 +43,10 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
   file contents are never opened.
 - It has no network access: no telemetry, no update check, no advertising.
 
-Two guard tests in `tests/anti_goals.rs` fail the build if write calls or network
-libraries appear in the code.
+Two guard tests in `tests/anti_goals.rs` back this up. One fails if a call from a list of
+write, delete and network functions appears in the source; the other fails if a known
+network library appears among the dependencies. They are tripwires against an accidental
+change, not a proof.
 
 ## Measured
 
@@ -63,7 +65,7 @@ file count and the same size.
 
 ## Build
 
-You need Windows 10 or 11 (x64) and a stable Rust toolchain with the MSVC target.
+You need Windows 10 or 11 (x64) and Rust 1.95 or newer with the MSVC target.
 
 ```powershell
 cargo build --release
@@ -89,6 +91,13 @@ A scan can also be started from the command line:
 platzhirsch.exe --scan C:
 ```
 
+The status bar shows the free space of the drive, the number of files, which scan ran and
+how long it took. Three counters appear only when they are not zero:
+
+- `skipped`: entries the fast scan could not read or could not place in the tree.
+- `unreadable`: folders the fallback scan could not open, usually for lack of rights.
+- `online-only`: cloud folders that are not on this machine. They are not entered.
+
 ## How it works
 
 - `src/scan/mft.rs` locates the Master File Table on the volume, reads it in large
@@ -110,6 +119,15 @@ The design document and the implementation plan are in
   folder totals inside `Windows` can differ from tools that count every name.
 - In the fallback scan, "allocated" is an approximation and hard links are counted once
   per name.
+- Very small files that NTFS stores inside the Master File Table count as 0 allocated,
+  and the space folders need for their own index is not counted. This is why the
+  allocated total of a drive is slightly below its used space.
+- The drive list is read once when the program starts. A drive plugged in later appears
+  after a restart.
+- The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
+  cannot start and says so.
+- The window cannot be read by screen readers.
+- The executable is not code-signed, so Windows SmartScreen may warn on the first start.
 
 ## License
 
