@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- Plattform: Windows 10/11 x64. Paketname `platzhirsch`. Code-Bezeichner englisch, Oberflächentexte deutsch und fest.
+- **Sprachänderung (Leon, 21.11.2026): Die App ist komplett englisch.** Wo dieser Plan deutsche Oberflächentexte, deutsches Zahlenformat oder deutsche `bench`-Schlüssel nennt, gilt der Abschnitt „Sprachänderung" am Ende.
+- Plattform: Windows 10/11 x64. Paketname `platzhirsch`. Code-Bezeichner, Kommentare und alle Texte englisch und fest.
 - **Niemals auf das gescannte Laufwerk schreiben.** Handles nur lesend öffnen. Dateiinhalte nie öffnen.
 - **Kein Netzwerkzugriff**, keine Telemetrie, keine Update-Prüfung, keine Werbe-Dialoge. Keine HTTP-Crates.
 - Kein Name, Logo oder Aussehen von TreeSize. Nichts dekompilieren.
@@ -684,3 +685,72 @@ assert_eq!(depth_color(0, false), depth_color(8, false));
   - `Langsam scannen` auf C: starten und abbrechen: stoppt binnen 1 s.
 - [ ] **Step 4:** Ergebnis als Liste an Leon: jeder Zielwert mit gemessener Zahl und „erreicht" oder „verfehlt". Verfehlte Werte nicht beschönigen.
 - [ ] **Step 5:** Commit `chore: v1 acceptance fixes` (falls Korrekturen nötig waren).
+
+---
+
+## Sprachänderung (Task 11b)
+
+Am 21.11.2026 hat Leon während der Umsetzung entschieden: **Die App ist komplett englisch**, ebenso das Changelog. Dieser Abschnitt ersetzt alle deutschen Texte, das deutsche Zahlenformat und die deutschen `bench`-Schlüssel in den Aufgaben oben. Er ist zugleich der Auftrag für Task 11b (nach Task 11, vor Task 12) und die Vorgabe für die Texte in Task 12 bis 14.
+
+### Number and date format (`format.rs`)
+
+Thousands separator `,`, decimal separator `.`, date `DD/MM/YYYY`.
+
+```rust
+assert_eq!(format_bytes(0), "0 Bytes");
+assert_eq!(format_bytes(1023), "1,023 Bytes");
+assert_eq!(format_bytes(1024), "1.0 KB");
+assert_eq!(format_bytes(1536), "1.5 KB");
+assert_eq!(format_bytes(820_124_835_840), "763.8 GB");
+assert_eq!(format_bytes(2_748_779_069_440), "2.5 TB");
+assert_eq!(format_bytes(u64::MAX), "16,384.0 PB");
+assert_eq!(format_count(1_683_667), "1,683,667");
+assert_eq!(format_count(999), "999");
+assert_eq!(format_percent(724, 1000), "72.4 %");
+assert_eq!(format_percent(5, 0), "0.0 %");
+assert_eq!(format_ymd(2026, 11, 21), "21/11/2026");
+assert_eq!(format_date(UNIX_EPOCH_FT + 1_795_262_400 * 10_000_000), "21/11/2026");
+```
+
+### UI texts
+
+| Was (German) | Now (English) |
+|---|---|
+| `Scannen` | `Scan` |
+| `Abbrechen` | `Cancel` |
+| `Ordner…` | `Folder…` |
+| `Anzeige:` | `Show:` |
+| `Belegt` | `Allocated` |
+| `Größe` | `Size` |
+| `Treemap` | `Treemap` |
+| `Der Schnellscan braucht Administratorrechte.` | `The fast scan needs administrator rights.` |
+| `Als Administrator neu starten` | `Restart as administrator` |
+| `Langsam scannen` | `Scan slowly` |
+| `Schnellscan fehlgeschlagen: {Meldung}` | `Fast scan failed: {message}` |
+| `Laufwerk wählen und „Scannen" drücken.` | `Choose a drive and press "Scan".` |
+| `{n} Einträge gefunden` | `{n} entries found` |
+| `Frei: {frei} von {gesamt}` | `Free: {free} of {total}` |
+| `{n} Dateien` | `{n} files` |
+| `MFT-Scan, {s} s` | `MFT scan, {s} s` |
+| `Ordner-Scan, Belegt genähert, {s} s` | `Folder scan, allocated approximate, {s} s` |
+| `{n} übersprungen` | `{n} skipped` |
+| `{n} nicht lesbar` | `{n} unreadable` |
+| `{n} nur online` | `{n} online-only` |
+| Column headers `Name`, `Belegt`, `Größe`, `Dateien`, `Ordner`, `% Eltern`, `Geändert` | `Name`, `Allocated`, `Size`, `Files`, `Folders`, `% of Parent`, `Modified` |
+| `Im Explorer anzeigen` | `Show in Explorer` |
+| `Pfad kopieren` | `Copy path` |
+| Markers `nicht lesbar`, `Verknüpfung`, `nur online` | `unreadable`, `link`, `online-only` |
+
+Status bar examples (replace the ones in Task 11):
+
+```rust
+assert_eq!(s, "Free: 1.3 TB of 3.7 TB | 1,683,667 files | MFT scan, 4.2 s | 3 skipped");
+assert_eq!(s, "12 files | Folder scan, allocated approximate, 0.8 s | 2 unreadable | 1 online-only");
+```
+
+### Messages and diagnostics
+
+- `ScanError` `Display` and every other message a user can see: short English sentences, e.g. `Access denied (administrator rights required)`, `Not an NTFS volume`, `MFT incomplete: found {found} of {expected} bytes`, `Read error: {error}`, `Not a folder`.
+- `bench` keys: `method`, `duration_s`, `entries`, `files`, `folders`, `size`, `allocated`, `skipped`, `unreadable`, `online_only`, `volume_used`, `deviation_percent`, `memory_after_scan_mb`, `memory_peak_mb`, `top:`, `error:`. Values of `method`: `MFT`, `Walk`. `bench compare`: `mft_files`, `mft_folders`, `mft_size`, `mft_allocated`, `walk_files`, `walk_folders`, `walk_size`, `walk_allocated`, `equal: yes|no`, `error: folder not found in MFT tree`.
+- Comments, doc comments, test names and assertion messages in `src/` and `tests/`: English.
+- The working name `Platzhirsch` (window title, package, exe) stays.

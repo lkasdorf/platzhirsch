@@ -314,7 +314,12 @@ Kein stiller Wechsel.
 **Statuszeile**: freier und gesamter Platz, Anzahl Dateien, benutzter Weg und Dauer, Anzahl
 übersprungener oder nicht lesbarer Einträge.
 
-**Sprache der Oberfläche [Vorschlag]:** Deutsch, fest. Zahlen und Datum im deutschen Format.
+**Sprache [Leon, geändert am 21.11.2026]:** Die App ist komplett englisch, feste Sprache.
+Das gilt für Oberfläche, Fehlermeldungen, Changelog, Code-Kommentare und das
+Diagnose-Programm. Zahlen im englischen Format (`1,683,667`, `763.8 GB`). Datum als
+`DD/MM/YYYY` **[Vorschlag]**, wie in Leons TreeSize-Anzeige. Die Skizze oben zeigt noch die
+frühere deutsche Fassung; die gültigen Texte stehen im Umsetzungsplan unter
+„Sprachänderung". Der Arbeitsname „Platzhirsch" bleibt.
 
 ## 6. Prüfung
 
@@ -357,7 +362,8 @@ Wird ein Zielwert verfehlt, wird das gemeldet und nicht stillschweigend hingenom
 Zum schnellen Gegenprüfen, alle änderbar:
 
 1. Arbeitsname „Platzhirsch".
-2. Oberfläche auf Deutsch, feste Sprache.
+2. ~~Oberfläche auf Deutsch~~ Von Leon am 21.11.2026 geändert: App komplett englisch.
+   Von Claude festgelegt bleibt nur das Datumsformat `DD/MM/YYYY`.
 3. Start ohne UAC, Neustart als Administrator per Knopf.
 4. Einzelne Ordner laufen immer über den Rückfallweg.
 5. Kein Löschen aus dem Programm, nur „Im Explorer anzeigen" und „Pfad kopieren".
