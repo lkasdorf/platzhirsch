@@ -3,6 +3,8 @@
 //! Layout follows the Linux ntfs3 headers (`fs/ntfs3/ntfs.h`): record header
 //! `MFT_REC`, attribute header `ATTRIB`, `ATTR_FILE_NAME`, `ATTR_LIST_ENTRY`.
 use super::runs::decode_runs;
+use crate::scan::mft::VolumeReader;
+use std::io;
 
 const ATTR_STD_INFO: u32 = 0x10;
 const ATTR_LIST: u32 = 0x20;
@@ -236,4 +238,63 @@ impl RecordBuilder {
         }
         r
     }
+}
+
+/// An in-memory volume. Reads outside `bytes` or covering `fail_at` fail.
+pub struct FakeVolume {
+    pub bytes: Vec<u8>,
+    pub fail_at: Option<u64>,
+}
+
+impl VolumeReader for FakeVolume {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let end = offset + buf.len() as u64;
+        if self.fail_at.is_some_and(|f| offset <= f && f < end) {
+            return Err(io::Error::other("injected read error"));
+        }
+        let src = self
+            .bytes
+            .get(offset as usize..end as usize)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+}
+
+const FAKE_CLUSTER: u64 = 4096;
+
+/// Builds a volume with 512 B/sector and 4096 B/cluster whose MFT occupies
+/// `mft_runs` (LCN, clusters). Record `n` of `records` is written at MFT byte
+/// `n * record_size`, mapped through the runs; all other slots stay zero.
+pub fn fake_volume(record_size: u32, mft_runs: &[(u64, u64)], records: Vec<(u64, Vec<u8>)>) -> FakeVolume {
+    assert!(record_size.is_power_of_two());
+    let end = mft_runs.iter().map(|&(lcn, n)| (lcn + n) * FAKE_CLUSTER).max().unwrap_or(0);
+    let mut bytes = vec![0u8; end.max(2 * FAKE_CLUSTER) as usize];
+
+    bytes[0x03..0x0B].copy_from_slice(b"NTFS    ");
+    put_u16(&mut bytes, 0x0B, 512);
+    bytes[0x0D] = (FAKE_CLUSTER / 512) as u8;
+    let total_sectors = bytes.len() as u64 / 512;
+    put_u64(&mut bytes, 0x28, total_sectors);
+    put_u64(&mut bytes, 0x30, mft_runs[0].0);
+    bytes[0x40] = (-(record_size.trailing_zeros() as i8)) as u8; // 2^(-v) bytes
+
+    let to_volume = |mft_off: u64| -> usize {
+        let mut start = 0;
+        for &(lcn, n) in mft_runs {
+            let len = n * FAKE_CLUSTER;
+            if mft_off < start + len {
+                return (lcn * FAKE_CLUSTER + mft_off - start) as usize;
+            }
+            start += len;
+        }
+        panic!("MFT offset {mft_off} outside the runs");
+    };
+    for (no, rec) in records {
+        assert_eq!(rec.len(), record_size as usize);
+        for (i, b) in rec.into_iter().enumerate() {
+            bytes[to_volume(no * u64::from(record_size) + i as u64)] = b;
+        }
+    }
+    FakeVolume { bytes, fail_at: None }
 }
