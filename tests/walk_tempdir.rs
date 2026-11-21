@@ -54,7 +54,7 @@ fn long_path() {
     let tmp = tempfile::tempdir().unwrap();
     let mut deep: PathBuf = tmp.path().to_path_buf();
     for i in 0..30 {
-        deep.push(format!("verzeichnis_{i:08}")); // 20 characters
+        deep.push(format!("directories_{i:08}")); // 20 characters
     }
     fs::create_dir_all(&deep).unwrap();
     write_file(&deep.join("f"), 7);
@@ -131,7 +131,7 @@ fn cancel_while_walking() {
 #[test]
 fn file_root_is_not_opened() {
     let tmp = tempfile::tempdir().unwrap();
-    let file = tmp.path().join("datei.txt");
+    let file = tmp.path().join("file.txt");
     write_file(&file, 10);
     match scan_walk(&file, &Progress::default()) {
         Err(ScanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory),
@@ -170,20 +170,20 @@ impl Drop for AclGuard {
 #[test]
 fn unreadable_dir_is_marked() {
     let tmp = tempfile::tempdir().unwrap();
-    let zu = tmp.path().join("zu");
-    fs::create_dir(&zu).unwrap();
-    write_file(&zu.join("f"), 500);
-    let guard = AclGuard(zu.clone());
-    let out = Command::new("icacls").arg(&zu).args(["/deny", "*S-1-1-0:(RD)"]).output().expect("run icacls");
+    let locked = tmp.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    write_file(&locked.join("f"), 500);
+    let guard = AclGuard(locked.clone());
+    let out = Command::new("icacls").arg(&locked).args(["/deny", "*S-1-1-0:(RD)"]).output().expect("run icacls");
     assert!(out.status.success(), "icacls failed: {out:?}");
-    assert!(fs::read_dir(&zu).is_err(), "icacls did not deny listing in this environment");
+    assert!(fs::read_dir(&locked).is_err(), "icacls did not deny listing in this environment");
 
     let r = scan_walk(tmp.path(), &Progress::default()).unwrap();
     let t = &r.tree;
-    let z = child(t, t.root(), "zu");
+    let z = child(t, t.root(), "locked");
     assert!(t.flags(z) & F_UNREADABLE != 0);
     assert!(t.children(z).is_empty());
     assert_eq!(r.unreadable, 1);
     drop(guard);
-    assert!(fs::read_dir(&zu).is_ok(), "ACL was not restored");
+    assert!(fs::read_dir(&locked).is_ok(), "ACL was not restored");
 }

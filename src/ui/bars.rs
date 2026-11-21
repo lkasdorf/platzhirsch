@@ -21,13 +21,13 @@ pub(super) enum Action {
     SlowScan(ScanTarget),
 }
 
-/// Seconds with one decimal and a comma, e.g. `4,2`.
+/// Seconds with one decimal, e.g. `4.2`.
 pub(super) fn format_seconds(d: Duration) -> String {
     let tenths = (d.as_millis() + 50) / 100;
-    format!("{},{}", tenths / 10, tenths % 10)
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
-/// A drive as shown in the drive list, e.g. `C:  NTFS  3,7 TB`.
+/// A drive as shown in the drive list, e.g. `C:  NTFS  3.7 TB`.
 fn volume_label(v: &VolumeInfo) -> String {
     format!("{}:  {}  {}", v.letter, v.fs_name, format_bytes(v.total))
 }
@@ -48,19 +48,19 @@ fn target_label(app: &App) -> String {
 pub fn status_text(result: &ScanResult, volume: Option<&VolumeInfo>) -> String {
     let mut parts = Vec::new();
     if let Some(v) = volume {
-        parts.push(format!("Frei: {} von {}", format_bytes(v.free), format_bytes(v.total)));
+        parts.push(format!("Free: {} of {}", format_bytes(v.free), format_bytes(v.total)));
     }
     let files = result.tree.file_count(result.tree.root());
-    parts.push(format!("{} Dateien", format_count(u64::from(files))));
+    parts.push(format!("{} files", format_count(u64::from(files))));
     let seconds = format_seconds(result.duration);
     parts.push(match result.method {
-        ScanMethod::Mft => format!("MFT-Scan, {seconds} s"),
-        ScanMethod::Walk => format!("Ordner-Scan, Belegt genähert, {seconds} s"),
+        ScanMethod::Mft => format!("MFT scan, {seconds} s"),
+        ScanMethod::Walk => format!("Folder scan, allocated approximate, {seconds} s"),
     });
     for (n, what) in [
-        (result.skipped, "übersprungen"),
-        (result.unreadable, "nicht lesbar"),
-        (result.online_only, "nur online"),
+        (result.skipped, "skipped"),
+        (result.unreadable, "unreadable"),
+        (result.online_only, "online-only"),
     ] {
         if n > 0 {
             parts.push(format!("{} {what}", format_count(n)));
@@ -88,21 +88,21 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
                     }
                 });
         });
-        if ui.add_enabled(!scanning && app.folder_rx.is_none(), egui::Button::new("Ordner…")).clicked() {
+        if ui.add_enabled(!scanning && app.folder_rx.is_none(), egui::Button::new("Folder…")).clicked() {
             action = Some(Action::PickFolder);
         }
         if scanning {
-            if ui.button("Abbrechen").clicked() {
+            if ui.button("Cancel").clicked() {
                 action = Some(Action::Cancel);
             }
-        } else if ui.add_enabled(app.target.is_some(), egui::Button::new("Scannen")).clicked() {
+        } else if ui.add_enabled(app.target.is_some(), egui::Button::new("Scan")).clicked() {
             action = Some(Action::Scan);
         }
         ui.separator();
-        ui.label("Anzeige:");
-        let belegt = ui.radio_value(&mut app.metric, Metric::Allocated, "Belegt");
-        let groesse = ui.radio_value(&mut app.metric, Metric::Size, "Größe");
-        if belegt.changed() || groesse.changed() {
+        ui.label("Show:");
+        let allocated = ui.radio_value(&mut app.metric, Metric::Allocated, "Allocated");
+        let size = ui.radio_value(&mut app.metric, Metric::Size, "Size");
+        if allocated.changed() || size.changed() {
             action = Some(Action::MetricChanged);
         }
         ui.separator();
@@ -118,7 +118,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
                 }
                 ScanMethod::Walk => {
                     ui.spinner();
-                    ui.label(format!("{} Einträge gefunden", format_count(done)));
+                    ui.label(format!("{} entries found", format_count(done)));
                 }
             }
             ui.weak(format!("{} s", format_seconds(started.elapsed())));
@@ -127,11 +127,11 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
     match &app.phase {
         Phase::AskElevation(letter) => {
             ui.horizontal(|ui| {
-                ui.label("Der Schnellscan braucht Administratorrechte.");
-                if ui.button("Als Administrator neu starten").clicked() {
+                ui.label("The fast scan needs administrator rights.");
+                if ui.button("Restart as administrator").clicked() {
                     action = Some(Action::Relaunch(*letter));
                 }
-                if ui.button("Langsam scannen").clicked() {
+                if ui.button("Scan slowly").clicked() {
                     action = Some(Action::SlowScan(ScanTarget::Volume(*letter)));
                 }
             });
@@ -140,7 +140,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
             ui.horizontal(|ui| {
                 ui.colored_label(ui.visuals().error_fg_color, message);
                 if let Some(target) = offer_walk
-                    && ui.button("Langsam scannen").clicked()
+                    && ui.button("Scan slowly").clicked()
                 {
                     let target = match target {
                         ScanTarget::Volume(letter) => ScanTarget::Volume(*letter),
@@ -198,7 +198,7 @@ mod tests {
             removable: false,
         };
         let s = status_text(&result, Some(&volume));
-        assert_eq!(s, "Frei: 1,3 TB von 3,7 TB | 1.683.667 Dateien | MFT-Scan, 4,2 s | 3 übersprungen");
+        assert_eq!(s, "Free: 1.3 TB of 3.7 TB | 1,683,667 files | MFT scan, 4.2 s | 3 skipped");
     }
 
     #[test]
@@ -207,6 +207,6 @@ mod tests {
         result.unreadable = 2;
         result.online_only = 1;
         let s = status_text(&result, None);
-        assert_eq!(s, "12 Dateien | Ordner-Scan, Belegt genähert, 0,8 s | 2 nicht lesbar | 1 nur online");
+        assert_eq!(s, "12 files | Folder scan, allocated approximate, 0.8 s | 2 unreadable | 1 online-only");
     }
 }

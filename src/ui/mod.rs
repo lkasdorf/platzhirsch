@@ -20,7 +20,7 @@ use crate::win::{self, VolumeInfo};
 use bars::Action;
 use rows::TreeView;
 
-const IDLE_HINT: &str = "Laufwerk wählen und „Scannen\" drücken.";
+const IDLE_HINT: &str = "Choose a drive and press \"Scan\".";
 /// How often the window redraws while a scan runs.
 const SCAN_REPAINT: Duration = Duration::from_millis(250);
 
@@ -170,7 +170,7 @@ impl App {
                 return;
             }
             Err(TryRecvError::Disconnected) => {
-                Phase::Failed { message: "Scan unerwartet beendet".into(), offer_walk: None }
+                Phase::Failed { message: "The scan ended unexpectedly.".into(), offer_walk: None }
             }
             Ok((Ok(result), info)) => {
                 let view = TreeView::new(&result.tree, self.metric);
@@ -179,7 +179,7 @@ impl App {
             Ok((Err(ScanError::Cancelled), _)) => Phase::Idle,
             Ok((Err(e), _)) => match (method, volume) {
                 (ScanMethod::Mft, Some(letter)) => Phase::Failed {
-                    message: format!("Schnellscan fehlgeschlagen: {e}"),
+                    message: format!("Fast scan failed: {e}"),
                     offer_walk: Some(ScanTarget::Volume(letter)),
                 },
                 _ => Phase::Failed { message: e.to_string(), offer_walk: None },

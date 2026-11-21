@@ -70,22 +70,22 @@ pub enum ScanError {
 impl fmt::Display for ScanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScanError::Cancelled => write!(f, "Scan abgebrochen"),
-            ScanError::AccessDenied => write!(f, "Zugriff verweigert (Administratorrechte nötig)"),
-            ScanError::NotNtfs => write!(f, "Kein NTFS-Laufwerk"),
+            ScanError::Cancelled => write!(f, "Scan cancelled"),
+            ScanError::AccessDenied => write!(f, "Access denied (administrator rights required)"),
+            ScanError::NotNtfs => write!(f, "Not an NTFS volume"),
             ScanError::MftIncomplete { found_bytes, expected_bytes } => write!(
                 f,
-                "MFT unvollständig: {found_bytes} von {expected_bytes} Bytes gefunden"
+                "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
             ),
-            ScanError::Io(e) => write!(f, "Lesefehler: {e}"),
+            ScanError::Io(e) => write!(f, "Read error: {e}"),
             ScanError::Ntfs(e) => {
                 let detail = match e {
-                    NtfsError::BadSignature => "ungültige Signatur",
-                    NtfsError::BadFixup => "Prüfsumme (Fixup) falsch",
-                    NtfsError::Truncated => "Daten abgeschnitten",
+                    NtfsError::BadSignature => "invalid signature",
+                    NtfsError::BadFixup => "checksum (fixup) mismatch",
+                    NtfsError::Truncated => "data truncated",
                     NtfsError::Malformed(what) => what,
                 };
-                write!(f, "NTFS-Daten fehlerhaft: {detail}")
+                write!(f, "NTFS data is corrupt: {detail}")
             }
         }
     }

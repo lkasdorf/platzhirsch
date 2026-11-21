@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use platzhirsch::scan::ScanTarget;
 
-/// `--scan X:` scans a drive, `--scan <Ordner>` a folder; anything else starts idle.
+/// `--scan X:` scans a drive, `--scan <folder>` a folder; anything else starts idle.
 pub fn parse_args(args: &[String]) -> Option<ScanTarget> {
     let [flag, target] = args else { return None };
     if flag != "--scan" || target.is_empty() {

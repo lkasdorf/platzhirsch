@@ -160,7 +160,7 @@ pub fn relaunch_elevated(args: &[String]) -> std::io::Result<()> {
     if result.0 as usize > 32 {
         Ok(())
     } else {
-        Err(std::io::Error::other(format!("Neustart mit Administratorrechten fehlgeschlagen (Code {})", result.0 as usize)))
+        Err(std::io::Error::other(format!("Restart with administrator rights failed (code {})", result.0 as usize)))
     }
 }
 
@@ -205,7 +205,7 @@ impl RawVolume {
     /// Opens `\\.\X:` with read access only. Needs admin rights.
     pub fn open(letter: char) -> std::io::Result<Self> {
         if !letter.is_ascii_alphabetic() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "kein Laufwerksbuchstabe"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a drive letter"));
         }
         let path = format!("\\\\.\\{}:", letter.to_ascii_uppercase());
         let file = std::fs::OpenOptions::new()
@@ -223,12 +223,12 @@ impl VolumeReader for RawVolume {
         while pos < buf.len() {
             let at = offset
                 .checked_add(pos as u64)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Offset zu groß"))?;
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Offset too large"))?;
             match self.file.seek_read(&mut buf[pos..], at) {
                 Ok(0) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "Lesen über das Ende des Laufwerks",
+                        "Read past the end of the volume",
                     ));
                 }
                 Ok(n) => pos += n,

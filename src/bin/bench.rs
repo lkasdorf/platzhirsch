@@ -10,7 +10,7 @@ use platzhirsch::scan::walk::scan_walk;
 use platzhirsch::scan::{Progress, ScanResult};
 use platzhirsch::win::{memory_mb, volume_info};
 
-const USAGE: &str = "Aufruf: bench mft <X:> [--out <Datei>]\n       bench walk <Pfad> [--out <Datei>]\n       bench compare <Ordner> [--out <Datei>]";
+const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]";
 const TOP_CHILDREN: usize = 15;
 
 enum Command {
@@ -59,12 +59,12 @@ fn emit(lines: &[String], out: Option<&str>) {
     if let Some(path) = out
         && let Err(e) = std::fs::write(path, &text)
     {
-        eprintln!("{path} konnte nicht geschrieben werden: {e}");
+        eprintln!("could not write {path}: {e}");
     }
 }
 
 fn fail(msg: String, out: Option<&str>) -> ! {
-    emit(&[format!("fehler: {msg}")], out);
+    emit(&[format!("error: {msg}")], out);
     std::process::exit(1);
 }
 
@@ -76,18 +76,18 @@ fn report(method: &str, result: &ScanResult, volume: Option<char>, walk_counts: 
     let root = t.root();
     let allocated = t.allocated(root);
     let mut lines = vec![
-        format!("methode: {method}"),
-        format!("dauer_s: {:.2}", result.duration.as_secs_f64()),
-        format!("eintraege: {}", t.len()),
-        format!("dateien: {}", t.file_count(root)),
-        format!("ordner: {}", t.dir_count(root)),
-        format!("groesse: {}", t.size(root)),
-        format!("belegt: {allocated}"),
-        format!("uebersprungen: {}", result.skipped),
+        format!("method: {method}"),
+        format!("duration_s: {:.2}", result.duration.as_secs_f64()),
+        format!("entries: {}", t.len()),
+        format!("files: {}", t.file_count(root)),
+        format!("folders: {}", t.dir_count(root)),
+        format!("size: {}", t.size(root)),
+        format!("allocated: {allocated}"),
+        format!("skipped: {}", result.skipped),
     ];
     if walk_counts {
-        lines.push(format!("nicht_lesbar: {}", result.unreadable));
-        lines.push(format!("nur_online: {}", result.online_only));
+        lines.push(format!("unreadable: {}", result.unreadable));
+        lines.push(format!("online_only: {}", result.online_only));
     }
     if let Some(letter) = volume {
         let volume_used = volume_info(letter).map_or(0, |v| v.total.saturating_sub(v.free));
@@ -96,11 +96,11 @@ fn report(method: &str, result: &ScanResult, volume: Option<char>, walk_counts: 
         } else {
             (allocated as f64 - volume_used as f64) / volume_used as f64 * 100.0
         };
-        lines.push(format!("volume_belegt: {volume_used}"));
-        lines.push(format!("abweichung_prozent: {deviation:.2}"));
+        lines.push(format!("volume_used: {volume_used}"));
+        lines.push(format!("deviation_percent: {deviation:.2}"));
     }
-    lines.push(format!("speicher_nach_scan_mb: {mem_now}"));
-    lines.push(format!("speicher_spitze_mb: {mem_peak}"));
+    lines.push(format!("memory_after_scan_mb: {mem_now}"));
+    lines.push(format!("memory_peak_mb: {mem_peak}"));
     for c in t.sorted_children(root, SortKey::Allocated, true).into_iter().take(TOP_CHILDREN) {
         lines.push(format!("top: {} {} {} {}", t.allocated(c), t.size(c), t.file_count(c), t.name(c)));
     }
@@ -131,7 +131,7 @@ fn split_drive_path(folder: &Path) -> Option<(char, Vec<String>)> {
 
 fn compare(folder: &Path, out: Option<&str>) {
     let Some((letter, names)) = split_drive_path(folder) else {
-        fail("kein lokaler Laufwerkspfad".to_string(), out);
+        fail("not a local drive path".to_string(), out);
     };
     let mft = scan_mft(letter, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
     let mt: &Tree = &mft.tree;
@@ -139,22 +139,22 @@ fn compare(folder: &Path, out: Option<&str>) {
     for name in &names {
         node = mt
             .child_by_name(node, name)
-            .unwrap_or_else(|| fail("Ordner im MFT-Baum nicht gefunden".to_string(), out));
+            .unwrap_or_else(|| fail("folder not found in MFT tree".to_string(), out));
     }
     let walk = scan_walk(folder, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
     let wt = &walk.tree;
     let wr = wt.root();
     let same = mt.file_count(node) == wt.file_count(wr) && mt.size(node) == wt.size(wr);
     let lines = vec![
-        format!("mft_dateien: {}", mt.file_count(node)),
-        format!("mft_ordner: {}", mt.dir_count(node)),
-        format!("mft_groesse: {}", mt.size(node)),
-        format!("mft_belegt: {}", mt.allocated(node)),
-        format!("walk_dateien: {}", wt.file_count(wr)),
-        format!("walk_ordner: {}", wt.dir_count(wr)),
-        format!("walk_groesse: {}", wt.size(wr)),
-        format!("walk_belegt: {}", wt.allocated(wr)),
-        format!("gleich: {}", if same { "ja" } else { "nein" }),
+        format!("mft_files: {}", mt.file_count(node)),
+        format!("mft_folders: {}", mt.dir_count(node)),
+        format!("mft_size: {}", mt.size(node)),
+        format!("mft_allocated: {}", mt.allocated(node)),
+        format!("walk_files: {}", wt.file_count(wr)),
+        format!("walk_folders: {}", wt.dir_count(wr)),
+        format!("walk_size: {}", wt.size(wr)),
+        format!("walk_allocated: {}", wt.allocated(wr)),
+        format!("equal: {}", if same { "yes" } else { "no" }),
     ];
     emit(&lines, out);
 }
@@ -169,7 +169,7 @@ fn main() {
     match command {
         Command::Mft(letter) => {
             let result = scan_mft(letter, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
-            emit(&report("mft", &result, Some(letter), false), out);
+            emit(&report("MFT", &result, Some(letter), false), out);
         }
         Command::Walk(path) => {
             let result = scan_walk(&path, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));

@@ -92,7 +92,7 @@ fn i64_at(rec: &[u8], off: usize) -> i64 {
 }
 
 fn bad_listing(what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("fehlerhafte Ordnerliste: {what}"))
+    io::Error::new(io::ErrorKind::InvalidData, format!("malformed folder listing: {what}"))
 }
 
 /// Decodes a buffer of FILE_ID_BOTH_DIR_INFO records chained by
@@ -100,13 +100,13 @@ fn bad_listing(what: &str) -> io::Error {
 fn parse_records(buf: &[u8], out: &mut Vec<Entry>) -> io::Result<()> {
     let mut off = 0usize;
     loop {
-        let rec = buf.get(off..).filter(|r| r.len() >= OFF_NAME).ok_or_else(|| bad_listing("Eintrag abgeschnitten"))?;
+        let rec = buf.get(off..).filter(|r| r.len() >= OFF_NAME).ok_or_else(|| bad_listing("entry truncated"))?;
         let next = u32_at(rec, OFF_NEXT) as usize;
         let name_len = u32_at(rec, OFF_NAME_LEN) as usize;
         let name_end = OFF_NAME.checked_add(name_len).filter(|&e| e <= rec.len() && name_len.is_multiple_of(2));
-        let name_end = name_end.ok_or_else(|| bad_listing("Name abgeschnitten"))?;
+        let name_end = name_end.ok_or_else(|| bad_listing("name truncated"))?;
         if next != 0 && next < name_end {
-            return Err(bad_listing("Einträge überlappen"));
+            return Err(bad_listing("entries overlap"));
         }
         let (units, _) = rec[OFF_NAME..name_end].as_chunks::<2>();
         let wide: Vec<u16> = units.iter().map(|&c| u16::from_le_bytes(c)).collect();
@@ -158,7 +158,7 @@ impl Drop for DirHandle {
 fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
     let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
     if !path.starts_with(&wide(r"\\?\")) && !path.starts_with(&wide(r"\\.\")) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Pfad ohne \\\\?\\-Präfix"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path without \\\\?\\ prefix"));
     }
     let mut nt = wide(r"\??\");
     nt.extend_from_slice(&path[4..]);
@@ -176,7 +176,7 @@ fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
 fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
     let nt = nt_path(path)?;
     let bytes = u16::try_from(nt.len() * 2)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Pfad zu lang"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path too long"))?;
     // The buffer is only read; the binding's type is `PWSTR` nonetheless.
     let name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: PWSTR(nt.as_ptr().cast_mut()) };
     let attributes = OBJECT_ATTRIBUTES {
@@ -222,7 +222,7 @@ fn ensure_directory(path: &[u16]) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
-        return Err(io::Error::new(io::ErrorKind::NotADirectory, "der Pfad ist kein Ordner"));
+        return Err(io::Error::new(io::ErrorKind::NotADirectory, "Not a folder"));
     }
     Ok(())
 }
@@ -402,7 +402,7 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
         let result = loop {
             // Err only if every worker is gone (a panic); the scope re-raises it.
             let Ok(Done { job, listing }) = rx.recv() else {
-                break Err(ScanError::Io(io::Error::other("Ordnerliste abgebrochen")));
+                break Err(ScanError::Io(io::Error::other("folder listing aborted")));
             };
             pending -= 1;
             let entries = match listing {
