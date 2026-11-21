@@ -1,28 +1,55 @@
-//! Diagnostic tool: `bench mft <X:> [--out <file>]` measures the MFT scan.
-use platzhirsch::model::SortKey;
-use platzhirsch::scan::Progress;
+//! Diagnostic tool:
+//! - `bench mft <X:> [--out <file>]` measures the MFT scan,
+//! - `bench walk <path> [--out <file>]` measures the directory walk,
+//! - `bench compare <folder> [--out <file>]` compares both for one folder.
+use std::path::{Component, Path, PathBuf, Prefix};
+
+use platzhirsch::model::{SortKey, Tree};
 use platzhirsch::scan::mft::scan_mft;
+use platzhirsch::scan::walk::scan_walk;
+use platzhirsch::scan::{Progress, ScanResult};
 use platzhirsch::win::{memory_mb, volume_info};
 
-const USAGE: &str = "Aufruf: bench mft <X:> [--out <Datei>]";
+const USAGE: &str = "Aufruf: bench mft <X:> [--out <Datei>]\n       bench walk <Pfad> [--out <Datei>]\n       bench compare <Ordner> [--out <Datei>]";
 const TOP_CHILDREN: usize = 15;
 
-fn parse_args(args: &[String]) -> Option<(char, Option<String>)> {
-    let [cmd, drive, rest @ ..] = args else { return None };
-    if cmd != "mft" {
-        return None;
-    }
-    let mut chars = drive.chars();
+enum Command {
+    Mft(char),
+    Walk(PathBuf),
+    Compare(PathBuf),
+}
+
+/// `X:` as a drive letter.
+fn drive_letter(s: &str) -> Option<char> {
+    let mut chars = s.chars();
     let letter = chars.next().filter(char::is_ascii_alphabetic)?;
-    if chars.as_str() != ":" {
-        return None;
-    }
+    (chars.as_str() == ":").then_some(letter)
+}
+
+/// The drive letter if `path` is a drive root (`X:\` or `X:`).
+fn drive_root_of(path: &Path) -> Option<char> {
+    let s = path.to_str()?;
+    drive_letter(s.strip_suffix(['\\', '/']).unwrap_or(s))
+}
+
+fn parse_args(args: &[String]) -> Option<(Command, Option<String>)> {
+    let [cmd, target, rest @ ..] = args else { return None };
     let out = match rest {
         [] => None,
         [flag, path] if flag == "--out" => Some(path.clone()),
         _ => return None,
     };
-    Some((letter, out))
+    let command = match cmd.as_str() {
+        "mft" => Command::Mft(drive_letter(target)?),
+        // A bare `X:` would mean the current directory on X; the root is meant.
+        "walk" => Command::Walk(match drive_letter(target) {
+            Some(l) => PathBuf::from(format!("{l}:\\")),
+            None => PathBuf::from(target),
+        }),
+        "compare" => Command::Compare(PathBuf::from(target)),
+        _ => return None,
+    };
+    Some((command, out))
 }
 
 /// Prints `lines` and, with `--out`, writes them to that file.
@@ -36,34 +63,20 @@ fn emit(lines: &[String], out: Option<&str>) {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some((letter, out)) = parse_args(&args) else {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    };
+fn fail(msg: String, out: Option<&str>) -> ! {
+    emit(&[format!("fehler: {msg}")], out);
+    std::process::exit(1);
+}
 
-    let result = match scan_mft(letter, &Progress::default()) {
-        Ok(r) => r,
-        Err(e) => {
-            emit(&[format!("fehler: {e}")], out.as_deref());
-            std::process::exit(1);
-        }
-    };
+/// The lines shared by `mft` and `walk`. `volume` adds the comparison with
+/// the volume's used space.
+fn report(method: &str, result: &ScanResult, volume: Option<char>, walk_counts: bool) -> Vec<String> {
     let (mem_now, mem_peak) = memory_mb();
-
     let t = &result.tree;
     let root = t.root();
     let allocated = t.allocated(root);
-    let volume_used = volume_info(letter).map_or(0, |v| v.total.saturating_sub(v.free));
-    let deviation = if volume_used == 0 {
-        0.0
-    } else {
-        (allocated as f64 - volume_used as f64) / volume_used as f64 * 100.0
-    };
-
     let mut lines = vec![
-        "methode: mft".to_string(),
+        format!("methode: {method}"),
         format!("dauer_s: {:.2}", result.duration.as_secs_f64()),
         format!("eintraege: {}", t.len()),
         format!("dateien: {}", t.file_count(root)),
@@ -71,13 +84,97 @@ fn main() {
         format!("groesse: {}", t.size(root)),
         format!("belegt: {allocated}"),
         format!("uebersprungen: {}", result.skipped),
-        format!("volume_belegt: {volume_used}"),
-        format!("abweichung_prozent: {deviation:.2}"),
-        format!("speicher_nach_scan_mb: {mem_now}"),
-        format!("speicher_spitze_mb: {mem_peak}"),
     ];
+    if walk_counts {
+        lines.push(format!("nicht_lesbar: {}", result.unreadable));
+        lines.push(format!("nur_online: {}", result.online_only));
+    }
+    if let Some(letter) = volume {
+        let volume_used = volume_info(letter).map_or(0, |v| v.total.saturating_sub(v.free));
+        let deviation = if volume_used == 0 {
+            0.0
+        } else {
+            (allocated as f64 - volume_used as f64) / volume_used as f64 * 100.0
+        };
+        lines.push(format!("volume_belegt: {volume_used}"));
+        lines.push(format!("abweichung_prozent: {deviation:.2}"));
+    }
+    lines.push(format!("speicher_nach_scan_mb: {mem_now}"));
+    lines.push(format!("speicher_spitze_mb: {mem_peak}"));
     for c in t.sorted_children(root, SortKey::Allocated, true).into_iter().take(TOP_CHILDREN) {
         lines.push(format!("top: {} {} {} {}", t.allocated(c), t.size(c), t.file_count(c), t.name(c)));
     }
-    emit(&lines, out.as_deref());
+    lines
+}
+
+/// Drive letter and folder names below the root of an absolute local path.
+fn split_drive_path(folder: &Path) -> Option<(char, Vec<String>)> {
+    let abs = std::path::absolute(folder).ok()?;
+    let mut components = abs.components();
+    let letter = match components.next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => char::from(l),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let mut names = Vec::new();
+    for c in components {
+        match c {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(n) => names.push(n.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    Some((letter, names))
+}
+
+fn compare(folder: &Path, out: Option<&str>) {
+    let Some((letter, names)) = split_drive_path(folder) else {
+        fail("kein lokaler Laufwerkspfad".to_string(), out);
+    };
+    let mft = scan_mft(letter, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
+    let mt: &Tree = &mft.tree;
+    let mut node = mt.root();
+    for name in &names {
+        node = mt
+            .child_by_name(node, name)
+            .unwrap_or_else(|| fail("Ordner im MFT-Baum nicht gefunden".to_string(), out));
+    }
+    let walk = scan_walk(folder, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
+    let wt = &walk.tree;
+    let wr = wt.root();
+    let same = mt.file_count(node) == wt.file_count(wr) && mt.size(node) == wt.size(wr);
+    let lines = vec![
+        format!("mft_dateien: {}", mt.file_count(node)),
+        format!("mft_ordner: {}", mt.dir_count(node)),
+        format!("mft_groesse: {}", mt.size(node)),
+        format!("mft_belegt: {}", mt.allocated(node)),
+        format!("walk_dateien: {}", wt.file_count(wr)),
+        format!("walk_ordner: {}", wt.dir_count(wr)),
+        format!("walk_groesse: {}", wt.size(wr)),
+        format!("walk_belegt: {}", wt.allocated(wr)),
+        format!("gleich: {}", if same { "ja" } else { "nein" }),
+    ];
+    emit(&lines, out);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some((command, out)) = parse_args(&args) else {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    };
+    let out = out.as_deref();
+    match command {
+        Command::Mft(letter) => {
+            let result = scan_mft(letter, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
+            emit(&report("mft", &result, Some(letter), false), out);
+        }
+        Command::Walk(path) => {
+            let result = scan_walk(&path, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
+            emit(&report("Walk", &result, drive_root_of(&path), true), out);
+        }
+        Command::Compare(folder) => compare(&folder, out),
+    }
 }

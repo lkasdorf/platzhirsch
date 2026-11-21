@@ -81,6 +81,12 @@ impl TreeBuilder {
         id as NodeId
     }
 
+    /// Sets extra flag bits on an entry pushed earlier (e.g. `F_UNREADABLE`
+    /// once its listing has failed).
+    pub fn add_flags(&mut self, id: NodeId, flags: u8) {
+        self.flags[id as usize] |= flags;
+    }
+
     pub fn finish(self, root: NodeId) -> (Tree, BuildStats) {
         let Self {
             names,
@@ -296,6 +302,15 @@ impl Tree {
         out
     }
 
+    /// The child of `dir` called `name`, compared case-insensitively.
+    pub fn child_by_name(&self, dir: NodeId, name: &str) -> Option<NodeId> {
+        let wanted = || name.chars().flat_map(char::to_lowercase);
+        self.children(dir)
+            .iter()
+            .copied()
+            .find(|&c| self.name(c).chars().flat_map(char::to_lowercase).eq(wanted()))
+    }
+
     fn cmp_names(&self, a: NodeId, b: NodeId) -> Ordering {
         let lower = |id| self.name(id).chars().flat_map(char::to_lowercase);
         lower(a).cmp(lower(b))
@@ -366,6 +381,25 @@ mod tests {
         // Files are all 0 -> tie, broken by name ascending (big.bin < Small.txt).
         assert_eq!(t.sorted_children(1, SortKey::Files, true), vec![4, 2, 3]);
         assert_eq!(t.sorted_children(0, SortKey::Dirs, true), vec![1, 6]);
+    }
+
+    #[test]
+    fn child_lookup_ignores_case() {
+        let (t, _) = sample();
+        assert_eq!(t.child_by_name(1, "small.TXT"), Some(3));
+        assert_eq!(t.child_by_name(0, "A"), Some(1));
+        assert_eq!(t.child_by_name(0, "x"), None); // grandchild, not a child
+        assert_eq!(t.child_by_name(5, "x"), None); // file has no children
+        assert_eq!(t.child_by_name(0, "lost"), None); // orphan
+    }
+
+    #[test]
+    fn add_flags_keeps_existing_bits() {
+        let mut b = TreeBuilder::with_capacity(1, 4);
+        let root = b.push("r", NO_PARENT, 0, 0, 0, F_DIR);
+        b.add_flags(root, F_UNREADABLE);
+        let (t, _) = b.finish(root);
+        assert_eq!(t.flags(root), F_DIR | F_UNREADABLE);
     }
 
     #[test]

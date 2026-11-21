@@ -1,6 +1,7 @@
 //! Scanners that fill a [`Tree`] and the types they share.
 pub mod mft;
 pub mod ntfs;
+pub mod walk;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64};
