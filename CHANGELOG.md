@@ -25,3 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the drive's used space. It is not shipped.
 - Guard tests that forbid write access to scanned drives and network libraries in the
   code.
+- Main window with a drive list, folder picker, scan and cancel buttons, a switch between
+  allocated space and size, and a status bar with free space, file count, scan method and
+  duration. The scan runs in the background and shows its progress.
+- Choice of scan method per drive: without administrator rights the app offers a restart
+  as administrator or the slow folder scan. If the fast scan fails, the error is shown and
+  the slow scan is offered; the app never switches silently. `--scan X:` or
+  `--scan <folder>` starts a scan right away.
