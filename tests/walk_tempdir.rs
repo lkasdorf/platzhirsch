@@ -168,6 +168,32 @@ impl Drop for AclGuard {
 }
 
 #[test]
+fn denied_root_is_access_denied_without_admin_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let locked = tmp.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    let guard = AclGuard(locked.clone());
+    let out = Command::new("icacls").arg(&locked).args(["/deny", "*S-1-1-0:(RD)"]).output().expect("run icacls");
+    assert!(out.status.success(), "icacls failed: {out:?}");
+    assert!(fs::read_dir(&locked).is_err(), "icacls did not deny listing in this environment");
+
+    match scan_walk(&locked, &Progress::default()) {
+        Err(e @ ScanError::FolderAccessDenied) => assert_eq!(e.to_string(), "Access denied"),
+        other => panic!("expected FolderAccessDenied, got {:?}", other.err()),
+    }
+    drop(guard);
+}
+
+#[test]
+fn relative_root_gets_absolute_name() {
+    // Tests run in the package directory.
+    let r = scan_walk(Path::new("src/scan"), &Progress::default()).unwrap();
+    let expected = format!("{}\\src\\scan", env!("CARGO_MANIFEST_DIR").trim_end_matches('\\'));
+    assert_eq!(r.tree.name(r.tree.root()), expected);
+    assert!(r.tree.child_by_name(r.tree.root(), "walk.rs").is_some());
+}
+
+#[test]
 fn unreadable_dir_is_marked() {
     let tmp = tempfile::tempdir().unwrap();
     let locked = tmp.path().join("locked");

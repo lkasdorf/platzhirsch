@@ -7,7 +7,7 @@
 //! hands out new directories as jobs.
 use std::io;
 use std::mem::offset_of;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
@@ -19,12 +19,13 @@ use windows::Wdk::Storage::FileSystem::{
     NtOpenFile,
 };
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
-    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdBothDirectoryInfo,
-    GetFileAttributesW, GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, SYNCHRONIZE,
+    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_FLAGS,
+    FileIdBothDirectoryInfo, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, GetFileAttributesW,
+    GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, SYNCHRONIZE, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::core::{PCWSTR, PWSTR};
@@ -227,6 +228,29 @@ fn ensure_directory(path: &[u16]) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ListEnd {
+    /// The listing is complete.
+    Complete,
+    /// The listing broke off.
+    Failed,
+}
+
+/// What a failed listing call on an opened directory handle means.
+/// `os_error` is its Win32 code, `returned_any` whether an earlier call on
+/// the same handle returned records.
+///
+/// A directory without `.` and `..` (a drive root, an empty folder on
+/// FAT/exFAT) answers the first call with `ERROR_FILE_NOT_FOUND` when it is
+/// empty. Errors from opening the directory never come here.
+fn listing_end(os_error: Option<i32>, returned_any: bool) -> ListEnd {
+    match os_error {
+        Some(code) if code == ERROR_NO_MORE_FILES.0 as i32 => ListEnd::Complete,
+        Some(code) if code == ERROR_FILE_NOT_FOUND.0 as i32 && !returned_any => ListEnd::Complete,
+        _ => ListEnd::Failed,
+    }
+}
+
 enum Listing {
     Complete(Vec<Entry>),
     /// The directory could not be opened or listed to the end.
@@ -241,6 +265,7 @@ fn list_dir(path: &[u16], follow: bool, cancel: &AtomicBool) -> Listing {
     };
     let mut buf = vec![0u64; LIST_BUF_BYTES / 8];
     let mut entries = Vec::new();
+    let mut returned_any = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Listing::Cancelled;
@@ -257,12 +282,12 @@ fn list_dir(path: &[u16], follow: bool, cancel: &AtomicBool) -> Listing {
         };
         if let Err(e) = r {
             let e = to_io(e);
-            return if e.raw_os_error() == Some(ERROR_NO_MORE_FILES.0 as i32) {
-                Listing::Complete(entries)
-            } else {
-                Listing::Failed(entries, e)
+            return match listing_end(e.raw_os_error(), returned_any) {
+                ListEnd::Complete => Listing::Complete(entries),
+                ListEnd::Failed => Listing::Failed(entries, e),
             };
         }
+        returned_any = true;
         // SAFETY: `u64` has no padding, so its memory is valid as bytes; the view ends before `buf` is used again.
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), LIST_BUF_BYTES) };
         if let Err(e) = parse_records(bytes, &mut entries) {
@@ -365,11 +390,70 @@ fn worker(queue: &Queue, tx: mpsc::Sender<Done>, cancel: &AtomicBool) {
 }
 
 fn scan_error(e: io::Error) -> ScanError {
-    if e.kind() == io::ErrorKind::PermissionDenied { ScanError::AccessDenied } else { ScanError::Io(e) }
+    if e.kind() == io::ErrorKind::PermissionDenied { ScanError::FolderAccessDenied } else { ScanError::Io(e) }
+}
+
+/// The root's name: its absolute path without a trailing backslash, so a
+/// drive root is `C:`.
+fn root_name(root: &Path) -> io::Result<String> {
+    let abs = std::path::absolute(root)?;
+    let full = abs.to_string_lossy();
+    let trimmed = full.trim_end_matches(['\\', '/']);
+    Ok(if trimmed.is_empty() { full.into_owned() } else { trimmed.to_string() })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RootAccess {
+    Proceed,
+    /// The folder is online-only: listing it would make the cloud provider
+    /// download it and write placeholders.
+    Refuse,
+}
+
+/// Whether a walk may list a root with these attributes (from its parent's listing).
+fn root_access(attributes: u32) -> RootAccess {
+    if attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN.0 != 0 { RootAccess::Refuse } else { RootAccess::Proceed }
+}
+
+/// `path` (verbatim, no NUL) without trailing backslashes, or `None` for a
+/// drive or share root, which has no entry in a parent directory.
+fn entry_path(path: &[u16]) -> Option<Vec<u16>> {
+    let bs = u16::from(b'\\');
+    let end = path.iter().rposition(|&c| c != bs)? + 1;
+    let trimmed = &path[..end];
+    let has_parent = Path::new(&std::ffi::OsString::from_wide(trimmed)).parent().is_some();
+    has_parent.then(|| trimmed.to_vec())
+}
+
+/// The attributes of `path`'s own entry as its parent's listing reports
+/// them. Unlike `GetFileAttributesW`, a directory listing carries
+/// `FILE_ATTRIBUTE_RECALL_ON_OPEN`. Lists the parent filtered to this one
+/// name; `path` itself is neither opened nor listed. `None` for a drive or
+/// share root, or if the parent cannot be listed.
+fn entry_attributes(path: &[u16]) -> Option<u32> {
+    let mut z = entry_path(path)?;
+    z.push(0);
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: `z` is NUL-terminated and `data` is a live WIN32_FIND_DATAW,
+    // the type FindExInfoBasic fills; both outlive the call.
+    let handle = unsafe {
+        FindFirstFileExW(
+            PCWSTR(z.as_ptr()),
+            FindExInfoBasic,
+            (&raw mut data).cast(),
+            FindExSearchNameMatch,
+            None,
+            FIND_FIRST_EX_FLAGS(0),
+        )
+    }
+    .ok()?;
+    // SAFETY: `handle` is a valid search handle from FindFirstFileExW, closed only here.
+    let _ = unsafe { FindClose(handle) };
+    Some(data.dwFileAttributes)
 }
 
 /// Walks the directory `root` (a folder, drive root or UNC path) in parallel.
-/// The root gets the given path without a trailing backslash as its name.
+/// The root gets its absolute path without a trailing backslash as its name.
 pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanError> {
     let started = Instant::now();
     if progress.cancel.load(Ordering::Relaxed) {
@@ -379,12 +463,13 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     progress.total.store(0, Ordering::Relaxed);
     let root_path = verbatim_path(root).map_err(scan_error)?;
     ensure_directory(&root_path).map_err(scan_error)?;
-    let given = root.as_os_str().to_string_lossy();
-    let trimmed = given.trim_end_matches(['\\', '/']);
-    let root_name = if trimmed.is_empty() { &*given } else { trimmed };
+    if entry_attributes(&root_path).map(root_access) == Some(RootAccess::Refuse) {
+        return Err(ScanError::OnlineOnly);
+    }
+    let root_name = root_name(root).map_err(scan_error)?;
 
     let mut b = TreeBuilder::with_capacity(4096, 64 * 1024);
-    let root_id = b.push(root_name, NO_PARENT, 0, 0, 0, F_DIR);
+    let root_id = b.push(&root_name, NO_PARENT, 0, 0, 0, F_DIR);
     let queue = Queue { state: Mutex::new((Vec::new(), false)), ready: Condvar::new() };
     queue.push(vec![Job { dir: root_id, path: root_path, follow: true }]);
     let threads = std::thread::available_parallelism().map_or(MIN_THREADS, |n| n.get()).clamp(MIN_THREADS, MAX_THREADS);
@@ -465,6 +550,58 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_directory_without_dot_entries_is_complete() {
+        let not_found = Some(ERROR_FILE_NOT_FOUND.0 as i32);
+        let no_more = Some(ERROR_NO_MORE_FILES.0 as i32);
+        assert_eq!(listing_end(not_found, false), ListEnd::Complete);
+        assert_eq!(listing_end(not_found, true), ListEnd::Failed);
+        assert_eq!(listing_end(no_more, false), ListEnd::Complete);
+        assert_eq!(listing_end(no_more, true), ListEnd::Complete);
+        assert_eq!(listing_end(Some(5), false), ListEnd::Failed); // access denied
+        assert_eq!(listing_end(None, false), ListEnd::Failed);
+    }
+
+    #[test]
+    fn online_only_root_is_refused() {
+        assert_eq!(root_access(0x10), RootAccess::Proceed);
+        assert_eq!(root_access(0x410), RootAccess::Proceed); // a link the user chose
+        assert_eq!(root_access(0x0040_0410), RootAccess::Proceed); // recall on data access only
+        assert_eq!(root_access(0x0004_0410), RootAccess::Refuse);
+        assert_eq!(root_access(0x0004_0010), RootAccess::Refuse);
+    }
+
+    #[test]
+    fn roots_have_no_parent_entry() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(entry_path(&w(r"\\?\C:\")), None);
+        assert_eq!(entry_path(&w(r"\\?\C:")), None);
+        assert_eq!(entry_path(&w(r"\\?\UNC\nas\share")), None);
+        assert_eq!(entry_path(&w(r"\\?\UNC\nas\share\")), None);
+        assert_eq!(entry_path(&w(r"\\?\C:\x\")), Some(w(r"\\?\C:\x")));
+        assert_eq!(entry_path(&w(r"\\?\UNC\nas\share\d")), Some(w(r"\\?\UNC\nas\share\d")));
+    }
+
+    #[test]
+    fn entry_attributes_of_a_local_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attributes = entry_attributes(&verbatim_path(tmp.path()).unwrap()).expect("attributes");
+        assert_ne!(attributes & FILE_ATTRIBUTE_DIRECTORY.0, 0);
+        assert_eq!(root_access(attributes), RootAccess::Proceed);
+        let mut with_slash = verbatim_path(tmp.path()).unwrap();
+        with_slash.push(u16::from(b'\\'));
+        assert_eq!(entry_attributes(&with_slash), Some(attributes));
+        assert_eq!(entry_attributes(&verbatim_path(Path::new(r"C:\")).unwrap()), None);
+    }
+
+    #[test]
+    fn root_names() {
+        assert_eq!(root_name(Path::new(r"C:\")).unwrap(), "C:");
+        assert_eq!(root_name(Path::new("c:/")).unwrap(), "c:");
+        assert_eq!(root_name(Path::new("C:/x/y/")).unwrap(), r"C:\x\y");
+        assert_eq!(root_name(Path::new(r"\\nas\share\")).unwrap(), r"\\nas\share");
+    }
 
     #[test]
     fn classify() {

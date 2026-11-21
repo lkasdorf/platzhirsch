@@ -60,7 +60,12 @@ pub struct ScanResult {
 #[derive(Debug)]
 pub enum ScanError {
     Cancelled,
+    /// The volume could not be opened for the MFT scan.
     AccessDenied,
+    /// The folder walk was refused access to its root folder.
+    FolderAccessDenied,
+    /// The walk root is a cloud folder that is not available locally.
+    OnlineOnly,
     NotNtfs,
     MftIncomplete { found_bytes: u64, expected_bytes: u64 },
     Io(std::io::Error),
@@ -72,6 +77,11 @@ impl fmt::Display for ScanError {
         match self {
             ScanError::Cancelled => write!(f, "Scan cancelled"),
             ScanError::AccessDenied => write!(f, "Access denied (administrator rights required)"),
+            ScanError::FolderAccessDenied => write!(f, "Access denied"),
+            ScanError::OnlineOnly => write!(
+                f,
+                "This folder is online-only; open it once in Explorer to make it available, then scan again."
+            ),
             ScanError::NotNtfs => write!(f, "Not an NTFS volume"),
             ScanError::MftIncomplete { found_bytes, expected_bytes } => write!(
                 f,
@@ -106,5 +116,15 @@ mod tests {
         assert_eq!(choose_method(&dir, true, "NTFS"), MethodChoice::Walk);
         assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, ""), MethodChoice::Walk);
         assert_eq!(choose_method(&vol, true, "ntfs"), MethodChoice::Mft);
+    }
+
+    #[test]
+    fn access_messages() {
+        assert_eq!(ScanError::AccessDenied.to_string(), "Access denied (administrator rights required)");
+        assert_eq!(ScanError::FolderAccessDenied.to_string(), "Access denied");
+        assert_eq!(
+            ScanError::OnlineOnly.to_string(),
+            "This folder is online-only; open it once in Explorer to make it available, then scan again."
+        );
     }
 }
