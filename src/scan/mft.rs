@@ -845,10 +845,20 @@ mod tests {
 
     #[test]
     fn real_volume_needs_elevation() {
-        // cargo test runs without admin rights
-        assert!(
-            matches!(scan_mft('C', &Progress::default()), Err(ScanError::AccessDenied)) || crate::win::is_elevated()
-        );
+        // Without admin rights (the usual local run) the volume is refused;
+        // with them (CI) the system drive is scanned for real.
+        if crate::win::is_elevated() {
+            let r = match scan_mft('C', &Progress::default()) {
+                Ok(r) => r,
+                Err(e) => panic!("elevated MFT scan of C: failed: {e}"),
+            };
+            let root = r.tree.root();
+            assert!(r.tree.file_count(root) > 0);
+            assert!(r.tree.allocated(root) > 0);
+            assert!(r.skipped <= 100, "skipped {}", r.skipped);
+        } else {
+            assert!(matches!(scan_mft('C', &Progress::default()), Err(ScanError::AccessDenied)));
+        }
     }
 
     #[test]
