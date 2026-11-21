@@ -1,5 +1,7 @@
 # Platzhirsch
 
+[![CI](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml/badge.svg?branch=v1)](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml)
+
 A fast disk space analyzer for Windows. It shows which folders use how much space, as a
 folder tree with sizes and as a treemap.
 

@@ -43,3 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the entry in the table and scrolls to it. The divider to the table can be dragged, and
   the "Treemap" switch hides it. The layout is recomputed only when the folder, the
   metric or the size changes; tiles thinner than one pixel are left out.
+- Continuous integration on GitHub Actions: tests and a release build on Windows for
+  every push to `main` and `v1` and for pull requests against `main`. The built
+  `platzhirsch.exe` is kept as a build artifact.
+- Release workflow: pushing a tag `vX.Y.Z` builds on Windows and attaches
+  `platzhirsch.exe` with its SHA-256 checksum to the GitHub release.
