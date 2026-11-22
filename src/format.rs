@@ -86,6 +86,7 @@ mod tests {
 
     #[test]
     fn unit_is_chosen_after_rounding() {
+        assert_eq!(format_bytes(1_023), "1,023 Bytes");
         assert_eq!(format_bytes(1_048_575), "1.0 MB");
         assert_eq!(format_bytes(1_024 * 1_024 - 51), "1.0 MB"); // 1,023.9502 KB rounds up to 1,024.0
         assert_eq!(format_bytes(1_024 * 1_024 - 52), "1,023.9 KB"); // 1,023.9492 KB rounds down

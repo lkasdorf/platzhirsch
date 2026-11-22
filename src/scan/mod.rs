@@ -103,20 +103,26 @@ impl fmt::Display for ScanError {
                 f,
                 "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
             ),
-            ScanError::Io(e) => {
-                let description = match e.kind() {
-                    std::io::ErrorKind::NotFound => "not found",
-                    std::io::ErrorKind::PermissionDenied => "access denied",
-                    std::io::ErrorKind::NotADirectory => "not a folder",
-                    std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
-                    std::io::ErrorKind::InvalidInput => "invalid input",
-                    _ => "I/O error",
-                };
-                match e.raw_os_error() {
-                    Some(code) => write!(f, "Read error: {description} (OS error {code})"),
-                    None => write!(f, "Read error: {description}"),
+            ScanError::Io(e) => match (e.raw_os_error(), e.get_ref()) {
+                // Messages built by this program are English; show them as they are.
+                (None, Some(own)) => write!(f, "Read error: {own}"),
+                (code, _) => {
+                    // Windows' own message text is in the system language, so it is never shown.
+                    let description = match e.kind() {
+                        std::io::ErrorKind::NotFound => "not found",
+                        std::io::ErrorKind::PermissionDenied => "access denied",
+                        std::io::ErrorKind::NotADirectory => "not a folder",
+                        std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
+                        std::io::ErrorKind::InvalidInput => "invalid input",
+                        std::io::ErrorKind::InvalidData => "invalid data",
+                        _ => "I/O error",
+                    };
+                    match code {
+                        Some(code) => write!(f, "Read error: {description} (OS error {code})"),
+                        None => write!(f, "Read error: {description}"),
+                    }
                 }
-            }
+            },
             ScanError::Ntfs(e) => {
                 let detail = match e {
                     NtfsError::BadSignature => "invalid signature",
@@ -177,9 +183,15 @@ mod tests {
         assert_eq!(text(Error::from_raw_os_error(5)), "Read error: access denied (OS error 5)");
         assert_eq!(text(Error::from_raw_os_error(267)), "Read error: not a folder (OS error 267)");
         assert_eq!(text(Error::from_raw_os_error(1117)), "Read error: I/O error (OS error 1117)");
-        assert_eq!(text(Error::new(ErrorKind::UnexpectedEof, "Windows text")), "Read error: unexpected end of data");
-        assert_eq!(text(Error::new(ErrorKind::InvalidInput, "path too long")), "Read error: invalid input");
-        assert_eq!(text(Error::new(ErrorKind::NotADirectory, "x")), "Read error: not a folder");
-        assert_eq!(text(Error::other("anything")), "Read error: I/O error");
+        assert_eq!(text(Error::from(ErrorKind::UnexpectedEof)), "Read error: unexpected end of data");
+        assert_eq!(text(Error::from(ErrorKind::InvalidInput)), "Read error: invalid input");
+        assert_eq!(text(Error::from(ErrorKind::NotADirectory)), "Read error: not a folder");
+        assert_eq!(text(Error::from(ErrorKind::InvalidData)), "Read error: invalid data");
+        assert_eq!(text(Error::from(ErrorKind::TimedOut)), "Read error: I/O error");
+        assert_eq!(
+            text(Error::new(ErrorKind::InvalidData, "Malformed folder listing: entry truncated")),
+            "Read error: Malformed folder listing: entry truncated"
+        );
+        assert_eq!(text(Error::other("Folder listing aborted")), "Read error: Folder listing aborted");
     }
 }
