@@ -7,7 +7,7 @@ folder tree with sizes and as a treemap.
 
 Platzhirsch reads the NTFS Master File Table directly instead of asking Windows for every
 folder one by one. On the development machine, a full scan of an NVMe drive with
-1.87 million entries takes two to three and a half seconds.
+1.88 million entries takes one to two and a half seconds.
 
 ![Platzhirsch main window: the folder table above, the treemap below](docs/screenshot.png)
 
@@ -15,7 +15,7 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
 
 ## Download
 
-Version 0.1.0 is the first release. Get `platzhirsch.exe` from the
+Get the latest `platzhirsch.exe` from the
 [releases page](https://github.com/lkasdorf/platzhirsch/releases/latest). It is a single
 file: no installer, nothing else to install. Each release lists the SHA-256 checksum of
 the file. The executable is not code-signed, so Windows SmartScreen may warn on the first
@@ -38,8 +38,10 @@ See the [changelog](CHANGELOG.md) for what each version contains.
   navigation, and "Show in Explorer" / "Copy path" on right-click. Only the visible rows
   are drawn.
 - **Treemap** of the folder selected in the table, coloured by level. Hover for path and
-  size, click a tile to select it in the table. The divider can be dragged and the
-  treemap can be hidden.
+  size, click a tile to select it in the table, click the name strip at the top to go up
+  one folder (when the treemap is too small for that strip, use the table). Folders whose
+  content is too small to draw are darker. The divider can be dragged and the treemap can
+  be hidden.
 - **A single .exe**, no installer, no runtime to install.
 
 ## What it never does
@@ -55,22 +57,24 @@ dependencies. They are tripwires against an accidental change, not a proof.
 
 ## Measured
 
-Taken on 2026-11-21 and 2026-11-22 with the diagnostic program `bench`:
+Taken on 2026-11-22 with the diagnostic program `bench` of version 0.2.0:
 
 | | Result |
 |---|---|
-| Fast scan, NVMe drive, 1.87 million entries | 2.1 s and 3.4 s in two runs |
-| Deviation of "allocated" from the drive's used space | 0.36 % |
-| Memory after the scan | 147 MB |
-| Peak memory during the scan | 246 MB |
-| Fallback scan of the same drive, without administrator rights | 42 s |
+| Fast scan, NVMe drive, 1.88 million entries | 2.3 s and 1.2 s in two runs |
+| Deviation of "allocated" from the drive's used space | 0.23 % |
+| Memory after the scan | 150 MB |
+| Peak memory during the scan | 249 MB |
+| Fallback scan of the same drive, without administrator rights | 34 s |
 
 For a folder with 141,418 files, the fast scan and the fallback scan report the same
 file count and the same size.
 
 ## Build
 
-You need Windows 10 or 11 (x64) and Rust 1.95 or newer with the MSVC target.
+You need Windows 10 or 11 (x64), Rust 1.95 or newer with the MSVC target, and the
+Windows SDK: its resource compiler `rc.exe` embeds the icon and the version information.
+The Visual Studio Build Tools that the MSVC target needs normally include it.
 
 ```powershell
 cargo build --release
@@ -89,6 +93,11 @@ The tests run without administrator rights.
 Start `platzhirsch.exe`, choose a drive or a folder and press "Scan". For a whole NTFS
 drive the app offers to restart as administrator for the fast scan, or to scan slowly
 without it.
+
+In the folder table the arrow keys move the selection and open or close folders, Enter
+expands or collapses the selected folder, the Menu key or Shift+F10 opens its menu, and
+Ctrl+C copies its path. Tab reaches the table and each column header, where Space or Enter
+sorts.
 
 A scan can also be started from the command line:
 
@@ -128,13 +137,21 @@ The design document and the implementation plan are in
   and the space folders need for their own index is not counted. This is why the
   allocated total of a drive is slightly below its used space.
 - A cloud folder that is not on this machine is refused as a scan target. The check
-  looks at the chosen folder itself. It does not catch a link that points into such a
-  folder, and it is skipped when the folder's parent cannot be listed.
-- The drive list is read once when the program starts. A drive plugged in later appears
-  after a restart.
+  looks at every folder on the path to the chosen folder, and for a `subst` drive or a
+  mapped network drive also at the path the drive points to. It stops at the first folder
+  whose parent cannot be listed. When the path goes through a link, Windows resolves the
+  link before the folders behind it can be checked, so a link that points into an
+  online-only folder can still make the provider fetch that folder's entry.
+- A symbolic link that was created as a file link but points to a folder is refused as a
+  scan target with "Not a folder". Windows does not resolve such a link either.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
-- The window cannot be read by screen readers.
+- Screen readers get the names of all controls and of each table row through the Windows
+  accessibility interface (UI Automation). In the table, selecting, expanding, sorting,
+  the context menu and copying work from the keyboard; column widths and the divider
+  between table and treemap can only be changed with the mouse. This was checked through
+  the accessibility tree, not with every screen reader. The treemap has no keyboard
+  navigation of its own; it follows the table's selection.
 - The executable is not code-signed, so Windows SmartScreen may warn on the first start.
 
 ## License

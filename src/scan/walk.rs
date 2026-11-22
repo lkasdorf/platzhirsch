@@ -1,14 +1,16 @@
 //! Fallback scanner: walks directories in parallel with ordinary Win32 calls.
 //!
 //! Used without admin rights, on non-NTFS volumes, on network paths and for
-//! single folders. Directories are opened for listing only; files are never
-//! opened. The walk uses an explicit work queue, never recursion: worker
+//! single folders. Directories are opened for listing only; file contents are
+//! never opened. To resolve where the scan target points if it is a link (or
+//! lies behind one), one handle with attribute access only is opened on it
+//! before the walk starts. The walk uses an explicit work queue, never recursion: worker
 //! threads list directories, the calling thread alone fills the tree and
 //! hands out new directories as jobs.
 use std::io;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Instant;
@@ -22,10 +24,12 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
-    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_FLAGS,
-    FileIdBothDirectoryInfo, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, GetFileAttributesW,
-    GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, SYNCHRONIZE, WIN32_FIND_DATAW,
+    FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_FLAGS, FileIdBothDirectoryInfo, FindClose, FindExInfoBasic,
+    FindExSearchNameMatch, FindFirstFileExW, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFileAttributesW,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, INVALID_FILE_ATTRIBUTES, SYNCHRONIZE, VOLUME_NAME_DOS,
+    WIN32_FIND_DATAW,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::core::{PCWSTR, PWSTR};
@@ -38,7 +42,11 @@ const REPARSE_NAME_SURROGATE: u32 = 0x2000_0000;
 /// Bytes per listing call; a multiple of 8 so the buffer is 8-byte aligned.
 const LIST_BUF_BYTES: usize = 64 * 1024;
 const MAX_THREADS: usize = 16;
-const MIN_THREADS: usize = 4;
+const MIN_THREADS: usize = 2;
+/// Workers when the number of processors cannot be determined.
+const FALLBACK_THREADS: usize = 4;
+/// The tree's name buffer must stay below 4 GiB (see `TreeBuilder::push`).
+const NAMES_LIMIT: usize = u32::MAX as usize;
 
 // Field offsets of FILE_ID_BOTH_DIR_INFO, taken from the crate's layout
 // (MS-FSCC 2.4.17 FileIdBothDirectoryInformation).
@@ -93,7 +101,7 @@ fn i64_at(rec: &[u8], off: usize) -> i64 {
 }
 
 fn bad_listing(what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("malformed folder listing: {what}"))
+    io::Error::new(io::ErrorKind::InvalidData, format!("Malformed folder listing: {what}"))
 }
 
 /// Decodes a buffer of FILE_ID_BOTH_DIR_INFO records chained by
@@ -106,6 +114,9 @@ fn parse_records(buf: &[u8], out: &mut Vec<Entry>) -> io::Result<()> {
         let name_len = u32_at(rec, OFF_NAME_LEN) as usize;
         let name_end = OFF_NAME.checked_add(name_len).filter(|&e| e <= rec.len() && name_len.is_multiple_of(2));
         let name_end = name_end.ok_or_else(|| bad_listing("name truncated"))?;
+        if name_len == 0 {
+            return Err(bad_listing("empty name"));
+        }
         if next != 0 && next < name_end {
             return Err(bad_listing("entries overlap"));
         }
@@ -145,12 +156,12 @@ fn to_io(e: windows::core::Error) -> io::Error {
     }
 }
 
-/// A directory handle opened for listing only; closed when dropped.
+/// A handle opened by `nt_open` (for listing or attribute access only); closed when dropped.
 struct DirHandle(HANDLE);
 
 impl Drop for DirHandle {
     fn drop(&mut self) {
-        // SAFETY: the handle was opened by `open_dir`, is valid and is closed only here.
+        // SAFETY: the handle was opened by `nt_open`, is valid and is closed only here.
         let _ = unsafe { CloseHandle(self.0) };
     }
 }
@@ -159,7 +170,7 @@ impl Drop for DirHandle {
 fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
     let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
     if !path.starts_with(&wide(r"\\?\")) && !path.starts_with(&wide(r"\\.\")) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path without \\\\?\\ prefix"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Path without \\\\?\\ prefix"));
     }
     let mut nt = wide(r"\??\");
     nt.extend_from_slice(&path[4..]);
@@ -175,9 +186,18 @@ fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
 /// since it was listed. (`FILE_LIST_DIRECTORY` has the same bit as read-data
 /// access on files, which is why this matters.)
 fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
+    let mut options = FILE_DIRECTORY_FILE.0 | FILE_SYNCHRONOUS_IO_NONALERT.0 | FILE_OPEN_FOR_BACKUP_INTENT.0;
+    if !follow {
+        options |= FILE_OPEN_REPARSE_POINT.0;
+    }
+    nt_open(path, FILE_LIST_DIRECTORY | SYNCHRONIZE, options)
+}
+
+/// Opens `path` (verbatim, no NUL) with `NtOpenFile`, sharing everything.
+fn nt_open(path: &[u16], access: FILE_ACCESS_RIGHTS, options: u32) -> io::Result<DirHandle> {
     let nt = nt_path(path)?;
     let bytes = u16::try_from(nt.len() * 2)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path too long"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path too long"))?;
     // The buffer is only read; the binding's type is `PWSTR` nonetheless.
     let name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: PWSTR(nt.as_ptr().cast_mut()) };
     let attributes = OBJECT_ATTRIBUTES {
@@ -186,17 +206,13 @@ fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
         Attributes: OBJ_CASE_INSENSITIVE,
         ..Default::default()
     };
-    let mut options = FILE_DIRECTORY_FILE.0 | FILE_SYNCHRONOUS_IO_NONALERT.0 | FILE_OPEN_FOR_BACKUP_INTENT.0;
-    if !follow {
-        options |= FILE_OPEN_REPARSE_POINT.0;
-    }
     let mut handle = HANDLE::default();
     let mut iosb = IO_STATUS_BLOCK::default();
     // SAFETY: all pointers point to live locals; `name` and `nt` outlive the call.
     let status = unsafe {
         NtOpenFile(
             &mut handle,
-            (FILE_LIST_DIRECTORY | SYNCHRONIZE).0,
+            access.0,
             &attributes,
             &mut iosb,
             (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
@@ -212,8 +228,10 @@ fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
 }
 
 /// Fails with `NotADirectory` if `path` (verbatim, no NUL) is not a directory.
-/// Reads the attributes only; the object is not opened for any data access.
-fn ensure_directory(path: &[u16]) -> io::Result<()> {
+/// With `allow_link`, a reparse point also passes: a symbolic link reports its
+/// own attributes, and whether its target is a folder is checked after it was
+/// resolved. Reads the attributes only; the object is not opened for any data access.
+fn ensure_directory(path: &[u16], allow_link: bool) -> io::Result<()> {
     let mut z = Vec::with_capacity(path.len() + 1);
     z.extend_from_slice(path);
     z.push(0);
@@ -222,7 +240,8 @@ fn ensure_directory(path: &[u16]) -> io::Result<()> {
     if attributes == INVALID_FILE_ATTRIBUTES {
         return Err(io::Error::last_os_error());
     }
-    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+    let link = allow_link && attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 && !link {
         return Err(io::Error::new(io::ErrorKind::NotADirectory, "Not a folder"));
     }
     Ok(())
@@ -296,10 +315,32 @@ fn list_dir(path: &[u16], follow: bool, cancel: &AtomicBool) -> Listing {
     }
 }
 
+/// True for a device path (`\\.\…`, also written with forward slashes).
+fn is_device_path(root: &Path) -> bool {
+    let s: Vec<u16> = root.as_os_str().encode_wide().take(4).collect();
+    let slash = |c: u16| c == u16::from(b'\\') || c == u16::from(b'/');
+    s.len() == 4 && slash(s[0]) && slash(s[1]) && s[2] == u16::from(b'.') && slash(s[3])
+}
+
+/// `root` made absolute. A bare drive letter with a colon (`X:`) is the
+/// drive root `X:\`, not the current folder on that drive.
+fn absolute_root(root: &Path) -> io::Result<PathBuf> {
+    let s: Vec<u16> = root.as_os_str().encode_wide().collect();
+    if let [letter, colon] = s[..]
+        && colon == u16::from(b':')
+        && u8::try_from(letter).is_ok_and(|l| l.is_ascii_alphabetic())
+    {
+        let mut drive = root.as_os_str().to_owned();
+        drive.push("\\");
+        return Ok(PathBuf::from(drive));
+    }
+    std::path::absolute(root)
+}
+
 /// `root` as an absolute path with `\\?\` (or `\\?\UNC\`) prefix, so long
 /// paths work. `\\?\` and `\\.\` paths are kept as they are.
 fn verbatim_path(root: &Path) -> io::Result<Vec<u16>> {
-    let abs = std::path::absolute(root)?;
+    let abs = absolute_root(root)?;
     let s: Vec<u16> = abs.as_os_str().encode_wide().collect();
     let bs = u16::from(b'\\');
     let prefix = |p: &str| s.starts_with(&p.encode_utf16().collect::<Vec<_>>());
@@ -368,7 +409,8 @@ impl Queue {
     }
 }
 
-/// Closes the queue if a worker panics, so the others stop and the scan ends.
+/// Closes the queue if a worker or the coordinating step panics, so the
+/// workers waiting for jobs stop and the scan ends.
 struct CloseOnPanic<'a>(&'a Queue);
 
 impl Drop for CloseOnPanic<'_> {
@@ -389,6 +431,11 @@ fn worker(queue: &Queue, tx: mpsc::Sender<Done>, cancel: &AtomicBool) {
     }
 }
 
+/// The tree cannot take more names; worded as in the MFT scan.
+fn names_too_long() -> ScanError {
+    ScanError::Io(io::Error::other("file names exceed 4 GiB"))
+}
+
 fn scan_error(e: io::Error) -> ScanError {
     if e.kind() == io::ErrorKind::PermissionDenied { ScanError::FolderAccessDenied } else { ScanError::Io(e) }
 }
@@ -396,7 +443,7 @@ fn scan_error(e: io::Error) -> ScanError {
 /// The root's name: its absolute path without a trailing backslash, so a
 /// drive root is `C:`.
 fn root_name(root: &Path) -> io::Result<String> {
-    let abs = std::path::absolute(root)?;
+    let abs = absolute_root(root)?;
     let full = abs.to_string_lossy();
     let trimmed = full.trim_end_matches(['\\', '/']);
     Ok(if trimmed.is_empty() { full.into_owned() } else { trimmed.to_string() })
@@ -410,9 +457,147 @@ enum RootAccess {
     Refuse,
 }
 
-/// Whether a walk may list a root with these attributes (from its parent's listing).
-fn root_access(attributes: u32) -> RootAccess {
-    if attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN.0 != 0 { RootAccess::Refuse } else { RootAccess::Proceed }
+/// Whether a walk may list a root, from the entries of the levels of its path
+/// from the top down (the attributes from each parent's listing, `None` if a
+/// level could not be queried). An online-only level refuses. A level that
+/// cannot be queried ends the check, and no further level is taken from
+/// `levels`, so a lazy iterator queries a parent only after it passed.
+fn path_access(levels: impl IntoIterator<Item = Option<u32>>) -> RootAccess {
+    for attributes in levels {
+        let Some(attributes) = attributes else { return RootAccess::Proceed };
+        if attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN.0 != 0 {
+            return RootAccess::Refuse;
+        }
+    }
+    RootAccess::Proceed
+}
+
+/// The paths of every level of `path` (verbatim, no NUL) below its drive or
+/// share root, from the top down: `\\?\C:\a\b` gives `\\?\C:\a` and
+/// `\\?\C:\a\b`; `\\?\UNC\nas\share\d` gives `\\?\UNC\nas\share\d`. Empty for
+/// a drive or share root and for a path without the `\\?\` prefix.
+fn levels(path: &[u16]) -> Vec<Vec<u16>> {
+    let bs = u16::from(b'\\');
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    let Some(rest) = path.strip_prefix(&prefix[..]) else { return Vec::new() };
+    let segments: Vec<&[u16]> = rest.split(|&c| c == bs).collect();
+    let unc: Vec<u16> = "UNC".encode_utf16().collect();
+    let is_unc = segments.first().is_some_and(|s| s.len() == 3 && s.iter().zip(&unc).all(|(&a, &b)| a & !0x20 == b));
+    // `UNC`, server and share, or the drive (`C:`) or volume name.
+    let root_segments = if is_unc { 3 } else { 1 };
+    if segments.len() <= root_segments {
+        return Vec::new();
+    }
+    let mut current = prefix;
+    current.extend(segments[..root_segments].join(&bs));
+    let mut out = Vec::new();
+    for segment in segments[root_segments..].iter().filter(|s| !s.is_empty()) {
+        current.push(bs);
+        current.extend_from_slice(segment);
+        out.push(current.clone());
+    }
+    out
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum LevelCheck {
+    Refuse,
+    Proceed,
+    /// The check ended at a link (only with `stop_at_link`): what lies behind
+    /// it has not been checked yet.
+    ReachedLink,
+}
+
+/// Checks the levels of `path` from the top down for online-only folders.
+/// With `stop_at_link`, the check ends after the first link (a junction,
+/// symbolic link or mount point), because the levels behind it lie elsewhere.
+fn check_levels(path: &[u16], stop_at_link: bool) -> LevelCheck {
+    let mut past_link = false;
+    let levels = levels(path).into_iter().map_while(|level| {
+        if past_link {
+            return None;
+        }
+        let entry = entry_attributes(&level);
+        past_link = stop_at_link && entry.is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
+        Some(entry.map(|(attributes, _)| attributes))
+    });
+    match path_access(levels) {
+        RootAccess::Refuse => LevelCheck::Refuse,
+        RootAccess::Proceed if past_link => LevelCheck::ReachedLink,
+        RootAccess::Proceed => LevelCheck::Proceed,
+    }
+}
+
+/// The path that is listed and whether it still needs a check of every
+/// level, from the outcome of the first check of the path as given and the
+/// result of resolving it. The listed path (the resolved one, or the given
+/// one if resolution failed) is checked in full whenever the first check
+/// ended at a link, also when resolution returned the same path, and
+/// whenever resolution returned another path, also without a link level on
+/// the way (a `subst` or mapped drive, whose root has no level at all).
+fn plan_root(given: Vec<u16>, first: LevelCheck, resolved: Option<Vec<u16>>) -> (Vec<u16>, bool) {
+    let elsewhere = resolved.as_ref().is_some_and(|r| *r != given);
+    let check_fully = first == LevelCheck::ReachedLink || elsewhere;
+    (resolved.unwrap_or(given), check_fully)
+}
+
+/// The final path of `path` (verbatim, no NUL) with links resolved, in the
+/// form `verbatim_path` gives: `\\?\C:\x` or `\\?\UNC\nas\share\x`, a drive
+/// or share root with one trailing backslash. Opens the object for attribute
+/// access only, following links; `None` if that or the query fails.
+fn final_path(path: &[u16]) -> Option<Vec<u16>> {
+    // No data access is requested, so no file content is read and no
+    // placeholder is hydrated. A symbolic link created as a file link that
+    // points to a folder is not resolved by Windows: this open fails, the
+    // path stays as given and the scan ends with "Not a folder".
+    let handle = nt_open(
+        path,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SYNCHRONOUS_IO_NONALERT.0 | FILE_OPEN_FOR_BACKUP_INTENT.0,
+    )
+    .ok()?;
+    let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0);
+    let mut buf = vec![0u16; 1024];
+    for _ in 0..2 {
+        // SAFETY: `handle` is open and `buf` is a live buffer whose length is passed with it.
+        let n = unsafe { GetFinalPathNameByHandleW(handle.0, &mut buf, flags) } as usize;
+        if n == 0 {
+            return None;
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            return normalize_final(buf);
+        }
+        // Too small: `n` is the size needed, including the NUL.
+        buf = vec![0u16; n];
+    }
+    None
+}
+
+/// `path` from `GetFinalPathNameByHandleW` in the form the walk uses, or
+/// `None` if it is not a `\\?\` path.
+fn normalize_final(mut path: Vec<u16>) -> Option<Vec<u16>> {
+    let bs = u16::from(b'\\');
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if !path.starts_with(&prefix) {
+        return None;
+    }
+    while path.len() > prefix.len() && path.last() == Some(&bs) {
+        path.pop();
+    }
+    if path.len() == prefix.len() {
+        return None;
+    }
+    if levels(&path).is_empty() {
+        // `\\?\C:` without the backslash would name the volume, not its root folder.
+        path.push(bs);
+    }
+    Some(path)
+}
+
+/// Picks the number of worker threads from the number of processors.
+fn worker_threads(processors: Option<usize>) -> usize {
+    processors.map_or(FALLBACK_THREADS, |n| n.clamp(MIN_THREADS, MAX_THREADS))
 }
 
 /// `path` (verbatim, no NUL) without trailing backslashes, or `None` for a
@@ -425,12 +610,12 @@ fn entry_path(path: &[u16]) -> Option<Vec<u16>> {
     has_parent.then(|| trimmed.to_vec())
 }
 
-/// The attributes of `path`'s own entry as its parent's listing reports
-/// them. Unlike `GetFileAttributesW`, a directory listing carries
-/// `FILE_ATTRIBUTE_RECALL_ON_OPEN`. Lists the parent filtered to this one
-/// name; `path` itself is neither opened nor listed. `None` for a drive or
+/// The attributes and reparse tag of `path`'s own entry as its parent's
+/// listing reports them. Unlike `GetFileAttributesW`, a directory listing
+/// carries `FILE_ATTRIBUTE_RECALL_ON_OPEN`. Lists the parent filtered to this
+/// one name; `path` itself is neither opened nor listed. `None` for a drive or
 /// share root, or if the parent cannot be listed.
-fn entry_attributes(path: &[u16]) -> Option<u32> {
+fn entry_attributes(path: &[u16]) -> Option<(u32, u32)> {
     let mut z = entry_path(path)?;
     z.push(0);
     let mut data = WIN32_FIND_DATAW::default();
@@ -449,33 +634,69 @@ fn entry_attributes(path: &[u16]) -> Option<u32> {
     .ok()?;
     // SAFETY: `handle` is a valid search handle from FindFirstFileExW, closed only here.
     let _ = unsafe { FindClose(handle) };
-    Some(data.dwFileAttributes)
+    // `dwReserved0` holds the reparse tag when the reparse-point attribute is set.
+    let tag = if data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 { data.dwReserved0 } else { 0 };
+    Some((data.dwFileAttributes, tag))
 }
 
 /// Walks the directory `root` (a folder, drive root or UNC path) in parallel.
 /// The root gets its absolute path without a trailing backslash as its name.
+/// A root that is a link is listed as the folder it points to.
 pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanError> {
+    scan_walk_limited(root, progress, NAMES_LIMIT)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the coordinating step panic once it has received a listing (tests only).
+    static PANIC_IN_COORDINATOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `scan_walk` with at most `names_limit` bytes of names in the tree, the root's included.
+fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Result<ScanResult, ScanError> {
     let started = Instant::now();
     if progress.cancel.load(Ordering::Relaxed) {
         return Err(ScanError::Cancelled);
     }
     progress.done.store(0, Ordering::Relaxed);
     progress.total.store(0, Ordering::Relaxed);
-    let root_path = verbatim_path(root).map_err(scan_error)?;
-    ensure_directory(&root_path).map_err(scan_error)?;
-    if entry_attributes(&root_path).map(root_access) == Some(RootAccess::Refuse) {
+    if is_device_path(root) {
+        return Err(ScanError::Io(io::Error::new(io::ErrorKind::InvalidInput, "Device paths are not supported")));
+    }
+    let given = verbatim_path(root).map_err(scan_error)?;
+    // The path as given is checked before anything on it is opened: opening
+    // an online-only item can already make the provider fetch it. Links on
+    // the way are checked themselves; what lies behind them is checked once
+    // they are resolved, and so is a path that resolves elsewhere without a
+    // link on the way.
+    let first = check_levels(&given, true);
+    if first == LevelCheck::Refuse {
         return Err(ScanError::OnlineOnly);
     }
+    ensure_directory(&given, true).map_err(scan_error)?;
+    let resolved = final_path(&given);
+    let (root_path, check_fully) = plan_root(given, first, resolved);
+    if check_fully && check_levels(&root_path, false) == LevelCheck::Refuse {
+        return Err(ScanError::OnlineOnly);
+    }
+    ensure_directory(&root_path, false).map_err(scan_error)?;
     let root_name = root_name(root).map_err(scan_error)?;
+    if root_name.len() > names_limit {
+        return Err(names_too_long());
+    }
+    let mut name_bytes = root_name.len();
 
     let mut b = TreeBuilder::with_capacity(4096, 64 * 1024);
     let root_id = b.push(&root_name, NO_PARENT, 0, 0, 0, F_DIR);
     let queue = Queue { state: Mutex::new((Vec::new(), false)), ready: Condvar::new() };
     queue.push(vec![Job { dir: root_id, path: root_path, follow: true }]);
-    let threads = std::thread::available_parallelism().map_or(MIN_THREADS, |n| n.get()).clamp(MIN_THREADS, MAX_THREADS);
+    let threads = worker_threads(std::thread::available_parallelism().ok().map(|n| n.get()));
     let (mut unreadable, mut online_only) = (0u64, 0u64);
 
     let outcome = std::thread::scope(|s| {
+        // If this closure panics, the workers waiting for jobs must stop, or
+        // the scope would wait for them for good.
+        let _close = CloseOnPanic(&queue);
         let (tx, rx) = mpsc::channel::<Done>();
         for _ in 0..threads {
             let tx = tx.clone();
@@ -484,12 +705,16 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
         }
         drop(tx);
         let mut pending = 1usize;
-        let result = loop {
+        let result = 'listings: loop {
             // Err only if every worker is gone (a panic); the scope re-raises it.
             let Ok(Done { job, listing }) = rx.recv() else {
-                break Err(ScanError::Io(io::Error::other("folder listing aborted")));
+                break Err(ScanError::Io(io::Error::other("Folder listing aborted")));
             };
             pending -= 1;
+            #[cfg(test)]
+            if PANIC_IN_COORDINATOR.get() {
+                panic!("the coordinating step panics on purpose in this test");
+            }
             let entries = match listing {
                 Listing::Cancelled => break Err(ScanError::Cancelled),
                 Listing::Complete(entries) => entries,
@@ -503,6 +728,10 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
             progress.done.fetch_add(entries.len() as u64, Ordering::Relaxed);
             let mut jobs = Vec::new();
             for e in entries {
+                if name_bytes.saturating_add(e.name.len()) > names_limit {
+                    break 'listings Err(names_too_long());
+                }
+                name_bytes += e.name.len();
                 let link = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
                 if e.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                     b.push(&e.name, job.dir, e.size, e.allocated, e.mtime, if link { F_LINK } else { 0 });
@@ -565,11 +794,204 @@ mod tests {
 
     #[test]
     fn online_only_root_is_refused() {
-        assert_eq!(root_access(0x10), RootAccess::Proceed);
-        assert_eq!(root_access(0x410), RootAccess::Proceed); // a link the user chose
-        assert_eq!(root_access(0x0040_0410), RootAccess::Proceed); // recall on data access only
-        assert_eq!(root_access(0x0004_0410), RootAccess::Refuse);
-        assert_eq!(root_access(0x0004_0010), RootAccess::Refuse);
+        let one = |a: u32| path_access([Some(a)]);
+        assert_eq!(one(0x10), RootAccess::Proceed);
+        assert_eq!(one(0x410), RootAccess::Proceed); // a link the user chose
+        assert_eq!(one(0x0040_0410), RootAccess::Proceed); // recall on data access only
+        assert_eq!(one(0x0004_0410), RootAccess::Refuse);
+        assert_eq!(one(0x0004_0010), RootAccess::Refuse);
+    }
+
+    #[test]
+    fn whole_path_is_checked() {
+        let (dir, online) = (Some(0x10), Some(0x0004_0410));
+        assert_eq!(path_access([dir, dir, dir]), RootAccess::Proceed);
+        assert_eq!(path_access([dir, dir, online]), RootAccess::Refuse);
+        assert_eq!(path_access([online, dir, dir]), RootAccess::Refuse);
+        // The second level is not readable: the check stops and the scan proceeds.
+        assert_eq!(path_access([dir, None, online]), RootAccess::Proceed);
+        // A drive root has no levels.
+        assert_eq!(path_access([]), RootAccess::Proceed);
+    }
+
+    #[test]
+    fn levels_are_queried_top_down_and_only_after_their_parent_passed() {
+        let answers = [Some(0x10), Some(0x0004_0010), Some(0x10)];
+        let mut asked = 0;
+        let levels = answers.iter().map(|&a| {
+            asked += 1;
+            a
+        });
+        assert_eq!(path_access(levels), RootAccess::Refuse);
+        assert_eq!(asked, 2, "a level below an online-only folder was queried");
+
+        let answers = [None, Some(0x10)];
+        let mut asked = 0;
+        let levels = answers.iter().map(|&a| {
+            asked += 1;
+            a
+        });
+        assert_eq!(path_access(levels), RootAccess::Proceed);
+        assert_eq!(asked, 1, "a level below an unreadable one was queried");
+    }
+
+    #[test]
+    fn listed_path_is_checked_in_full_after_a_link_or_when_it_resolves_elsewhere() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        let given = w(r"\\?\C:\mnt\a");
+        let other = w(r"\\?\D:\a");
+        // No link level on the way, but the path resolves elsewhere (a `subst`
+        // or mapped drive): the resolved one in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(other.clone())), (other.clone(), true));
+        let drive = w(r"\\?\X:\");
+        let behind = w(r"\\?\C:\Users\me\OneDrive");
+        assert_eq!(plan_root(drive, LevelCheck::Proceed, Some(behind.clone())), (behind, true));
+        // Resolution returned the given path: the first check covered every level, one pass only.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(given.clone())), (given.clone(), false));
+        // Resolution failed: the first check covered every level, one pass only.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, None), (given.clone(), false));
+        // It ended at a link and resolution failed: the given path in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::ReachedLink, None), (given.clone(), true));
+        // It ended at a link and resolution returned the same path: that path in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::ReachedLink, Some(given.clone())), (given.clone(), true));
+        // It ended at a link and resolution returned another path: the resolved one in full.
+        assert_eq!(plan_root(given, LevelCheck::ReachedLink, Some(other.clone())), (other, true));
+    }
+
+    #[test]
+    fn levels_below_the_drive_or_share_root() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        let ws = |v: &[&str]| v.iter().map(|s| w(s)).collect::<Vec<_>>();
+        assert_eq!(levels(&w(r"\\?\C:\a\b")), ws(&[r"\\?\C:\a", r"\\?\C:\a\b"]));
+        assert_eq!(levels(&w(r"\\?\C:\a\b\")), ws(&[r"\\?\C:\a", r"\\?\C:\a\b"]));
+        assert_eq!(levels(&w(r"\\?\C:\")), ws(&[]));
+        assert_eq!(levels(&w(r"\\?\C:")), ws(&[]));
+        assert_eq!(levels(&w(r"\\?\UNC\nas\share")), ws(&[]));
+        assert_eq!(levels(&w(r"\\?\UNC\nas\share\")), ws(&[]));
+        assert_eq!(levels(&w(r"\\?\UNC\nas\share\d\e")), ws(&[r"\\?\UNC\nas\share\d", r"\\?\UNC\nas\share\d\e"]));
+        assert_eq!(levels(&w(r"\\?\unc\nas\share\d")), ws(&[r"\\?\unc\nas\share\d"]));
+        assert_eq!(levels(&w(r"C:\a")), ws(&[]));
+    }
+
+    #[test]
+    fn final_paths_are_normalized() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(normalize_final(w(r"\\?\C:\x\")), Some(w(r"\\?\C:\x")));
+        assert_eq!(normalize_final(w(r"\\?\C:\x")), Some(w(r"\\?\C:\x")));
+        assert_eq!(normalize_final(w(r"\\?\C:\")), Some(w(r"\\?\C:\")));
+        assert_eq!(normalize_final(w(r"\\?\C:")), Some(w(r"\\?\C:\")));
+        assert_eq!(normalize_final(w(r"\\?\UNC\nas\share\d")), Some(w(r"\\?\UNC\nas\share\d")));
+        assert_eq!(normalize_final(w(r"\\?\UNC\nas\share")), Some(w(r"\\?\UNC\nas\share\")));
+        assert_eq!(normalize_final(w(r"\Device\HarddiskVolume3\x")), None);
+        assert_eq!(normalize_final(w(r"\\?\")), None);
+    }
+
+    /// Uses the links every Windows installation has, since this module
+    /// creates no files of its own (see `tests/anti_goals.rs`); links made by
+    /// `mklink` are tested in `tests/walk_tempdir.rs`.
+    #[test]
+    fn final_path_resolves_links() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        let same = |a: &[u16], b: &str| String::from_utf16_lossy(a).eq_ignore_ascii_case(b);
+        let resolve = |p: &str| final_path(&verbatim_path(Path::new(p)).unwrap());
+        match std::env::var("SystemDrive") {
+            Ok(drive) => {
+                // A junction and a directory symbolic link.
+                let links = [
+                    (format!(r"{drive}\Documents and Settings"), format!(r"\\?\{drive}\Users")),
+                    (format!(r"{drive}\Users\All Users"), format!(r"\\?\{drive}\ProgramData")),
+                ];
+                for (link, target) in &links {
+                    let given = verbatim_path(Path::new(link)).unwrap();
+                    let is_link = entry_attributes(&given).is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
+                    if !is_link {
+                        eprintln!("skipped {link}: not a link on this system");
+                        continue;
+                    }
+                    let resolved = resolve(link).unwrap_or_else(|| panic!("{link} not resolved"));
+                    assert!(same(&resolved, target), "{link} -> {}", String::from_utf16_lossy(&resolved));
+                    assert_eq!(check_levels(&resolved, false), LevelCheck::Proceed);
+                    assert_eq!(check_levels(&given, true), LevelCheck::ReachedLink);
+                }
+            }
+            Err(_) => eprintln!("skipped the system links: SystemDrive is not set"),
+        }
+        // A folder that is no link resolves to itself, with long names.
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = final_path(&verbatim_path(tmp.path()).unwrap()).expect("folder resolved");
+        assert_eq!(final_path(&plain), Some(plain.clone()));
+        // A drive root keeps its backslash.
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let root = w(&format!(r"\\?\{drive}\"));
+        let resolved_root = final_path(&root).expect("drive root resolved");
+        assert!(same(&resolved_root, &format!(r"\\?\{drive}\")));
+        assert_eq!(final_path(&verbatim_path(&tmp.path().join("missing")).unwrap()), None);
+    }
+
+    /// Runs `scan_walk_limited` on another thread and waits at most 30 seconds
+    /// for it, so a walk that hangs fails the test instead of the suite.
+    /// `Some(None)` if the walk panicked, `None` if it did not return in time.
+    fn walk_with_timeout(
+        root: &Path,
+        names_limit: usize,
+        panic_in_coordinator: bool,
+    ) -> Option<Option<Result<ScanResult, ScanError>>> {
+        let (tx, rx) = mpsc::channel();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            PANIC_IN_COORDINATOR.set(panic_in_coordinator);
+            let outcome = std::panic::catch_unwind(|| scan_walk_limited(&root, &Progress::default(), names_limit));
+            let _ = tx.send(outcome.ok());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
+    }
+
+    #[test]
+    fn panic_in_the_coordinating_step_ends_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, true)
+            .expect("the walk hangs after a panic in its coordinating step");
+        assert!(outcome.is_none(), "the panic does not propagate");
+        // Without the injected panic the same walk succeeds.
+        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, false).expect("the walk hangs");
+        assert!(matches!(outcome, Some(Ok(_))));
+    }
+
+    #[test]
+    fn names_beyond_the_limit_end_the_walk_with_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tempfile::tempdir_in(tmp.path()).unwrap();
+        let file = tempfile::NamedTempFile::new_in(tmp.path()).unwrap();
+        let name_len = |p: &Path| p.file_name().unwrap().to_str().unwrap().len();
+        let total = root_name(tmp.path()).unwrap().len() + name_len(sub.path()) + name_len(file.path());
+        let walk = |limit| walk_with_timeout(tmp.path(), limit, false).expect("the walk hangs").expect("the walk panics");
+        let tree = walk(total).expect("names within the limit");
+        assert_eq!(tree.tree.len(), 3);
+        for limit in [total - 1, root_name(tmp.path()).unwrap().len() - 1] {
+            let err = walk(limit).err().expect("names beyond the limit accepted");
+            assert_eq!(err.to_string(), "Read error: file names exceed 4 GiB");
+        }
+    }
+
+    #[test]
+    fn worker_thread_count() {
+        assert_eq!(worker_threads(Some(1)), 2);
+        assert_eq!(worker_threads(Some(2)), 2);
+        assert_eq!(worker_threads(Some(8)), 8);
+        assert_eq!(worker_threads(Some(16)), 16);
+        assert_eq!(worker_threads(Some(64)), 16);
+        assert_eq!(worker_threads(None), FALLBACK_THREADS);
+    }
+
+    #[test]
+    fn device_paths() {
+        assert!(is_device_path(Path::new(r"\\.\C:")));
+        assert!(is_device_path(Path::new(r"\\.\PhysicalDrive0")));
+        assert!(is_device_path(Path::new("//./C:")));
+        assert!(!is_device_path(Path::new(r"\\?\C:\x")));
+        assert!(!is_device_path(Path::new(r"\\nas\share")));
+        assert!(!is_device_path(Path::new(r"C:\.\x")));
+        assert!(!is_device_path(Path::new(r"\\.")));
     }
 
     #[test]
@@ -587,8 +1009,9 @@ mod tests {
     fn entry_attributes_of_a_local_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let attributes = entry_attributes(&verbatim_path(tmp.path()).unwrap()).expect("attributes");
-        assert_ne!(attributes & FILE_ATTRIBUTE_DIRECTORY.0, 0);
-        assert_eq!(root_access(attributes), RootAccess::Proceed);
+        assert_ne!(attributes.0 & FILE_ATTRIBUTE_DIRECTORY.0, 0);
+        assert_eq!(attributes.1, 0);
+        assert_eq!(path_access([Some(attributes.0)]), RootAccess::Proceed);
         let mut with_slash = verbatim_path(tmp.path()).unwrap();
         with_slash.push(u16::from(b'\\'));
         assert_eq!(entry_attributes(&with_slash), Some(attributes));
@@ -681,6 +1104,28 @@ mod tests {
         let mut odd = buf.clone();
         odd[OFF_NAME_LEN..][..4].copy_from_slice(&5u32.to_le_bytes());
         assert!(parse_records(&odd, &mut out).is_err());
+    }
+
+    #[test]
+    fn empty_name_is_malformed() {
+        let mut buf = Vec::new();
+        let a = record(&mut buf, "a", 0x20, 0, 1);
+        let b = record(&mut buf, "", 0x20, 0, 1);
+        link_next(&mut buf, a, b);
+        let mut out = Vec::new();
+        let err = parse_records(&buf, &mut out).expect_err("empty name accepted");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "Malformed folder listing: empty name");
+        // Entries read before it are kept.
+        assert_eq!(out.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["a"]);
+    }
+
+    #[test]
+    fn bare_drive_letter_is_the_drive_root() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(verbatim_path(Path::new("C:")).unwrap(), w(r"\\?\C:\"));
+        assert_eq!(root_name(Path::new("C:")).unwrap(), "C:");
+        assert_eq!(root_name(Path::new("d:")).unwrap(), "d:");
     }
 
     #[test]

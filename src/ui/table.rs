@@ -2,18 +2,21 @@
 //!
 //! Only the visible rows are drawn (`TableBody::rows`); everything computed
 //! here per frame is per visible row. The row list itself lives in
-//! [`TreeView`] and is rebuilt there only on change.
-use eframe::egui::{self, Align, Color32, Key, Layout, Rect, Sense, Ui, vec2};
+//! [`TreeView`] and never changes per frame.
+//!
+//! For screen readers the table is one tree: each drawn row is one item whose
+//! name repeats what the row shows, and the selected row is the item the
+//! keyboard focus is on. The cells' own texts are hidden from them.
+use eframe::egui::{
+    self, Align, Color32, Context, Event, FocusDirection, Id, IdSalt, Key, Layout, Popup, Rangef, Rect, Response,
+    Role, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
+};
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use super::rows::{NavKey, TreeView};
+use super::rows::{NavKey, TreeView, metric_key};
 use crate::format::{format_bytes, format_count, format_date, format_percent};
 use crate::model::{F_LINK, F_ONLINE_ONLY, F_UNREADABLE, Metric, NodeId, SortKey, Tree};
 use crate::win;
-
-pub struct TableResponse {
-    pub selection_changed: bool,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
@@ -38,10 +41,77 @@ const COLUMNS: [(Col, &str); 7] = [
 
 /// Indentation per tree level.
 const INDENT: f32 = 16.0;
+/// The indentation takes at most this share of the Name column.
+const MAX_INDENT_SHARE: f32 = 0.4;
 /// Width of the expand/collapse arrow.
 const ARROW_WIDTH: f32 = 14.0;
 /// Colour of the share bar behind the name.
 const BAR_COLOR: Color32 = Color32::from_rgba_unmultiplied_const(240, 170, 50, 110);
+/// Id salt of the `TableBuilder`; the column resize handles derive their ids from it.
+const TABLE_SALT: &str = "tree_table";
+/// The accessible name of the table.
+const TABLE_NAME: &str = "Folders";
+/// A menu asked for with the keyboard waits this many frames for its row to be on screen:
+/// a row scrolled into view is drawn in the next frame and has its rectangle in the one after.
+const MENU_WAIT_PASSES: u64 = 2;
+
+/// The table's own `Ui`: the tree in the accessibility tree, and the one
+/// keyboard focus target for all rows.
+fn table_id() -> Id {
+    Id::unique("tree_table")
+}
+
+/// The accessibility item of `node`'s row; stable while the rows move.
+fn row_item_id(node: NodeId) -> Id {
+    table_id().with(("row", node))
+}
+
+/// The clickable, focusable area of the header of column `index`.
+fn header_id(index: usize) -> Id {
+    table_id().with(("header", index))
+}
+
+/// Takes a widget out of what screen readers see; its text is part of a
+/// name given elsewhere.
+fn hide_from_screen_readers(ctx: &Context, id: Id) {
+    ctx.accesskit_node_builder(id, |node| node.set_hidden());
+}
+
+/// The texts a row shows in its size columns. The row's accessible name is
+/// built from these same strings.
+struct RowTexts {
+    allocated: String,
+    size: String,
+    percent: String,
+}
+
+impl RowTexts {
+    fn new(tree: &Tree, node: NodeId, metric: Metric) -> Self {
+        let percent = match tree.parent(node) {
+            None => format_percent(1, 1),
+            Some(p) => format_percent(tree.metric(node, metric), tree.metric(p, metric)),
+        };
+        RowTexts { allocated: format_bytes(tree.allocated(node)), size: format_bytes(tree.size(node)), percent }
+    }
+}
+
+/// The accessible name of a row:
+/// `{name}, {allocated} allocated, {size} size, {percent} of parent`, then
+/// `folder, expanded` or `folder, collapsed` for a folder (`folder` is
+/// `Some(expanded)`), then the marker if there is one.
+fn row_name(name: &str, texts: &RowTexts, folder: Option<bool>, marker: Option<&str>) -> String {
+    let mut s = format!("{name}, {} allocated, {} size, {} of parent", texts.allocated, texts.size, texts.percent);
+    match folder {
+        Some(true) => s.push_str(", folder, expanded"),
+        Some(false) => s.push_str(", folder, collapsed"),
+        None => {}
+    }
+    if let Some(marker) = marker {
+        s.push_str(", ");
+        s.push_str(marker);
+    }
+    s
+}
 
 /// The note shown behind an entry's name. `unreadable` wins over
 /// `online-only`, which wins over `link`.
@@ -76,10 +146,7 @@ fn column_key(col: Col, metric: Metric) -> SortKey {
         Col::Size => SortKey::Size,
         Col::Files => SortKey::Files,
         Col::Folders => SortKey::Dirs,
-        Col::Percent => match metric {
-            Metric::Allocated => SortKey::Allocated,
-            Metric::Size => SortKey::Size,
-        },
+        Col::Percent => metric_key(metric),
         Col::Modified => SortKey::Modified,
     }
 }
@@ -110,7 +177,7 @@ fn next_sort(current: (SortKey, bool), shown: Col, clicked: Col, metric: Metric)
 }
 
 /// The path handed to Explorer and the clipboard; a drive root `C:` becomes `C:\`.
-fn full_path(tree: &Tree, node: NodeId) -> String {
+pub(super) fn full_path(tree: &Tree, node: NodeId) -> String {
     let mut path = tree.path(node);
     if path.ends_with(':') {
         path.push('\\');
@@ -118,9 +185,15 @@ fn full_path(tree: &Tree, node: NodeId) -> String {
     path
 }
 
-/// Text in a cell, right-aligned.
-fn right_label(ui: &mut Ui, text: String) {
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text));
+/// A cell with `text` right-aligned (or nothing). The row's name already
+/// says what the cell shows, so the cell is hidden from screen readers.
+fn text_cell(row: &mut TableRow<'_, '_>, ctx: &Context, text: Option<&str>) {
+    let (_, cell) = row.col(|ui| {
+        if let Some(text) = text {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text));
+        }
+    });
+    hide_from_screen_readers(ctx, cell.id);
 }
 
 /// A small triangle showing the sort direction.
@@ -131,24 +204,44 @@ fn sort_arrow(ui: &mut Ui, desc: bool) {
     ui.painter().add(egui::Shape::rotated_triangle(rect, rotation, color));
 }
 
-/// One header cell; returns true when it was clicked.
-fn header_cell(header: &mut TableRow<'_, '_>, col: Col, title: &str, sorted: Option<bool>) -> bool {
-    let (_, response) = header.col(|ui| {
-        if col == Col::Name {
-            ui.strong(title);
+/// One header cell; returns true when it was clicked, or activated with
+/// Space or Enter while it has the keyboard focus. For screen readers the
+/// cell is a button `Sort by {title}` that tells the sort direction.
+fn header_cell(header: &mut TableRow<'_, '_>, col: Col, index: usize, title: &str, sorted: Option<bool>) -> bool {
+    let mut clicked = false;
+    header.col(|ui| {
+        let ctx = ui.ctx().clone();
+        let rect = ui.max_rect();
+        // Below the title, so the title does not take its clicks.
+        let response = ui.interact(rect, header_id(index), Sense::click());
+        let enabled = ui.is_enabled();
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, format!("Sort by {title}")));
+        if let Some(desc) = sorted {
+            let direction = if desc { accesskit::SortDirection::Descending } else { accesskit::SortDirection::Ascending };
+            ctx.accesskit_node_builder(response.id, |node| node.set_sort_direction(direction));
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(rect, 2.0, ui.visuals().selection.stroke, StrokeKind::Inside);
+        }
+        let label = if col == Col::Name {
+            let label = ui.strong(title);
             if let Some(desc) = sorted {
                 sort_arrow(ui, desc);
             }
+            label
         } else {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(desc) = sorted {
                     sort_arrow(ui, desc);
                 }
-                ui.strong(title);
-            });
-        }
+                ui.strong(title)
+            })
+            .inner
+        };
+        hide_from_screen_readers(&ctx, label.id);
+        clicked = response.clicked();
     });
-    response.clicked()
+    clicked
 }
 
 /// What the user did with the rows this frame; applied after drawing.
@@ -157,20 +250,85 @@ struct RowInput {
     /// Row index to select.
     select: Option<usize>,
     toggle: Option<NodeId>,
+    /// The selected row's item and rectangle, if it was drawn.
+    selected_item: Option<(Id, Rect)>,
+}
+
+/// The table's keys pressed this frame, in order.
+#[derive(Default)]
+struct TableKeys {
+    nav: Vec<NavKey>,
+    /// Enter presses: each toggles the selected folder.
+    toggle: usize,
+    /// The Menu key or Shift+F10.
+    menu: bool,
+    /// Ctrl+C (egui-winit turns it into `Event::Copy`), Ctrl+Insert or the Copy key.
+    copy: bool,
+}
+
+/// The keys meant for the table. They act only while the table has the
+/// keyboard focus or nothing has it, and no menu or list is open: a focused
+/// button, header, drive list or text field keeps its keys. `last_focus` is
+/// the focus at the end of the last frame, so a key that made a text field
+/// give up the focus earlier in this frame does not act a second time here.
+fn table_keys(ctx: &Context, table: Id, last_focus: Option<Id>) -> TableKeys {
+    let free = |focus: Option<Id>| focus.is_none_or(|f| f == table);
+    if !free(ctx.memory(|m| m.focused())) || !free(last_focus) || Popup::is_any_open(ctx) {
+        return TableKeys::default();
+    }
+    ctx.input(|i| {
+        let mut keys = TableKeys::default();
+        for event in &i.events {
+            match event {
+                Event::Key { key, pressed: true, modifiers, .. } => match key {
+                    Key::ArrowUp => keys.nav.push(NavKey::Up),
+                    Key::ArrowDown => keys.nav.push(NavKey::Down),
+                    Key::ArrowLeft => keys.nav.push(NavKey::Left),
+                    Key::ArrowRight => keys.nav.push(NavKey::Right),
+                    Key::Enter if !modifiers.any() => keys.toggle += 1,
+                    Key::Menu => keys.menu = true,
+                    Key::F10 if modifiers.shift_only() => keys.menu = true,
+                    _ => {}
+                },
+                Event::Copy => keys.copy = true,
+                _ => {}
+            }
+        }
+        keys
+    })
+}
+
+/// The indentation of a row at `depth` in a Name column `width` wide:
+/// `INDENT` per level, but at most `MAX_INDENT_SHARE` of the column.
+fn indent_width(depth: u32, width: f32) -> f32 {
+    (depth as f32 * INDENT).min(width.max(0.0) * MAX_INDENT_SHARE)
 }
 
 /// The name cell: indentation, arrow, share bar, name and marker.
-/// Returns true when the arrow was clicked.
-fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u16, row_height: f32) -> bool {
+/// Returns true when the arrow was clicked; the second click of a
+/// double-click does not count, so a double-click toggles once.
+/// Also returns the row's item for screen readers, which spans `row_x`; the
+/// name and marker texts are hidden from them, the item's name holds both.
+fn name_cell(
+    ui: &mut Ui,
+    tree: &Tree,
+    view: &TreeView,
+    node: NodeId,
+    depth: u32,
+    row_height: f32,
+    row_x: Rangef,
+) -> (bool, Response) {
     let cell = ui.max_rect();
-    let indent = (f32::from(depth) * INDENT).min((cell.width() - 2.0 * ARROW_WIDTH).max(0.0));
-    ui.add_space(indent);
+    // Senses only hover, so it takes no clicks from the cell or the arrow.
+    let item = ui.interact(Rect::from_x_y_ranges(row_x, cell.y_range()), row_item_id(node), Sense::hover());
+    ui.add_space(indent_width(depth, cell.width()));
     let mut arrow_clicked = false;
     if tree.is_dir(node) && !tree.children(node).is_empty() {
-        let (_, response) = ui.allocate_exact_size(vec2(ARROW_WIDTH, row_height), Sense::click());
+        // Not a Tab stop: the keys reach it through the row (Left, Right, Enter).
+        let (_, response) = ui.allocate_exact_size(vec2(ARROW_WIDTH, row_height), Sense::CLICK);
         let openness = if view.is_expanded(node) { 1.0 } else { 0.0 };
         egui::collapsing_header::paint_default_icon(ui, openness, &response);
-        arrow_clicked = response.clicked();
+        arrow_clicked = response.clicked() && !response.double_clicked();
     } else {
         ui.add_space(ARROW_WIDTH);
     }
@@ -184,33 +342,107 @@ fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u16
         );
         ui.painter().rect_filled(bar, 2.0, BAR_COLOR);
     }
-    ui.label(tree.name(node));
+    // The full path replaces egui's own tooltip for a cut-off name; it is
+    // built only while the name is hovered.
+    let label = ui.add(egui::Label::new(tree.name(node)).show_tooltip_when_elided(false)).on_hover_ui(|ui| {
+        ui.set_max_width(ui.spacing().tooltip_width);
+        ui.label(full_path(tree, node));
+    });
+    hide_from_screen_readers(ui.ctx(), label.id);
     if let Some(marker) = marker_text(tree.flags(node)) {
-        ui.weak(marker);
+        let marker = ui.weak(marker);
+        hide_from_screen_readers(ui.ctx(), marker.id);
     }
-    arrow_clicked
+    (arrow_clicked, item)
 }
 
 /// The tree table. Draws only the visible rows; `scroll_to` asks for a row
 /// index to be scrolled into view.
-pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) -> TableResponse {
-    let before = view.selected;
-    let ctx = ui.ctx().clone();
-    let mut scroll_to = scroll_to;
-
-    // Arrow keys, unless a widget has keyboard focus or a menu is open.
-    if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() {
-        for (key, nav) in [
-            (Key::ArrowUp, NavKey::Up),
-            (Key::ArrowDown, NavKey::Down),
-            (Key::ArrowLeft, NavKey::Left),
-            (Key::ArrowRight, NavKey::Right),
-        ] {
-            for _ in 0..ctx.input(|i| i.num_presses(key)) {
-                scroll_to = Some(view.key_nav(tree, nav));
-            }
-        }
+///
+/// Keyboard: the table is one Tab stop. While it or nothing has the focus,
+/// the arrow keys move the selection (see [`TreeView::key_nav`]), Enter
+/// expands or collapses the selected folder, the Menu key or Shift+F10 opens
+/// the selected row's context menu, and Ctrl+C copies its full path. The
+/// column headers are Tab stops of their own and sort with Space or Enter.
+pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) {
+    let builder = UiBuilder::new().scope_id(table_id()).sense(Sense::FOCUSABLE).accessibility_role(Role::Tree);
+    let shown = ui.scope_builder(builder, |ui| table(ui, tree, view, scroll_to));
+    let response = shown.response;
+    response.widget_info(|| WidgetInfo::labeled(Role::Tree, true, TABLE_NAME));
+    // After the table's `Ui` has ended: it gives up the focus when the click
+    // that selected a row did not land on the `Ui` itself.
+    if shown.inner {
+        response.request_focus();
     }
+    let focus = ui.ctx().memory(|m| m.focused());
+    ui.ctx().data_mut(|d| d.insert_temp(last_focus_id(), focus));
+}
+
+/// Where the table keeps the keyboard focus it saw at the end of a frame.
+fn last_focus_id() -> Id {
+    table_id().with("focus_at_frame_end")
+}
+
+/// The table inside its own `Ui`. Returns true when the table should take
+/// the keyboard focus: a row was clicked, or a menu opened with the keyboard
+/// has closed.
+fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) -> bool {
+    let ctx = ui.ctx().clone();
+    let table = ui.unique_id();
+    let mut scroll_to = scroll_to;
+    let mut take_focus = false;
+
+    // A menu opened with the keyboard gives the focus back to the table once it
+    // has closed, unless the focus has moved on. Kept: the ids of its entries,
+    // which may still hold the focus in the first frame after it closed.
+    let return_id = table.with("menu_returns_focus");
+    if !Popup::is_any_open(&ctx)
+        && let Some(entries) = ctx.data_mut(|d| d.remove_temp::<Vec<Id>>(return_id))
+    {
+        take_focus = ctx.memory(|m| m.focused()).is_none_or(|f| entries.contains(&f));
+    }
+
+    let last_focus = ctx.data(|d| d.get_temp::<Option<Id>>(last_focus_id())).flatten();
+    let keys = table_keys(&ctx, table, last_focus);
+    if !keys.nav.is_empty() && ctx.memory(|m| m.has_focus(table)) {
+        // The arrows move the selection, not egui's focus to a neighbouring widget.
+        ctx.memory_mut(|m| m.move_focus(FocusDirection::None));
+    }
+    for &nav in &keys.nav {
+        scroll_to = Some(view.key_nav(tree, nav));
+    }
+    for _ in 0..keys.toggle {
+        view.toggle(tree, view.selected);
+    }
+    if keys.copy {
+        ctx.copy_text(full_path(tree, view.selected));
+    }
+    // The menu opens when the selected row is on screen: this frame, or within
+    // two frames after scrolling to it. A row not on screen by then drops the
+    // request, so the menu cannot pop open much later.
+    let menu_id = table.with("menu_for_row");
+    let pass = ctx.cumulative_pass_nr();
+    if keys.menu {
+        ctx.data_mut(|d| d.insert_temp(menu_id, (view.selected, pass)));
+        scroll_to = Some(view.selected_row());
+    }
+    let menu_for = ctx
+        .data(|d| d.get_temp::<(NodeId, u64)>(menu_id))
+        .filter(|&(n, asked)| n == view.selected && pass <= asked.saturating_add(MENU_WAIT_PASSES))
+        .map(|(n, _)| n);
+    if menu_for.is_none() {
+        ctx.data_mut(|d| d.remove_temp::<(NodeId, u64)>(menu_id));
+    }
+
+    // A context menu belongs to the row index it was opened on; when the
+    // rows have changed since the last frame, that index shows another entry.
+    let version_id = Id::unique("tree_table_rows_version");
+    let version = view.rows_version();
+    let rows_changed = ctx.data_mut(|d| {
+        let last = d.get_temp::<u64>(version_id);
+        d.insert_temp(version_id, version);
+        last.is_some_and(|last| last != version)
+    });
 
     let metric = view.metric();
     let (sort_key, desc) = view.sort();
@@ -218,15 +450,17 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     let row_height = ui.spacing().interact_size.y;
     let mut header_click = None;
     let mut input = RowInput::default();
+    let focused = ctx.memory(|m| m.has_focus(table));
 
-    ui.scope(|ui| {
+    {
         // Labels must not swallow the clicks that select rows.
         ui.style_mut().interaction.selectable_labels = false;
         let mut builder = TableBuilder::new(ui)
-            .id_salt("tree_table")
+            .id_salt(TABLE_SALT)
             .striped(true)
             .resizable(true)
-            .sense(Sense::click())
+            // Clicks only: the cells are no Tab stops, the table is one.
+            .sense(Sense::CLICK)
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::remainder().at_least(160.0).clip(true))
             .column(Column::initial(90.0).at_least(60.0))
@@ -238,77 +472,145 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
         if let Some(row) = scroll_to {
             builder = builder.scroll_to_row(row, None);
         }
+        if keys.menu {
+            // Jump to the row, so it is drawn by the next frame and its menu can open.
+            builder = builder.animate_scrolling(false);
+        }
         builder
             .header(row_height, |mut header| {
-                for (col, title) in COLUMNS {
+                for (index, (col, title)) in COLUMNS.into_iter().enumerate() {
                     let sorted = (col == shown).then_some(desc);
-                    if header_cell(&mut header, col, title, sorted) {
+                    if header_cell(&mut header, col, index, title, sorted) {
                         header_click = Some(col);
                     }
                 }
             })
-            .body(|body| {
+            .body(|mut body| {
+                let painter = body.ui_mut().painter().clone();
+                let focus_stroke = body.ui_mut().visuals().selection.stroke;
+                let row_x = body.max_rect().x_range();
                 let rows = view.rows();
                 body.rows(row_height, rows.len(), |mut row| {
                     let r = rows[row.index()];
                     let node = r.node;
                     let is_dir = tree.is_dir(node);
-                    row.set_selected(node == view.selected);
+                    let selected = node == view.selected;
+                    row.set_selected(selected);
+                    let texts = RowTexts::new(tree, node, metric);
+                    let mut item = None;
                     row.col(|ui| {
-                        if name_cell(ui, tree, view, node, r.depth, row_height) {
+                        let (arrow_clicked, response) = name_cell(ui, tree, view, node, r.depth, row_height, row_x);
+                        if arrow_clicked {
                             input.toggle = Some(node);
                         }
+                        item = Some(response);
                     });
-                    row.col(|ui| right_label(ui, format_bytes(tree.allocated(node))));
-                    row.col(|ui| right_label(ui, format_bytes(tree.size(node))));
-                    row.col(|ui| {
-                        if is_dir {
-                            right_label(ui, format_count(u64::from(tree.file_count(node))));
-                        }
-                    });
-                    row.col(|ui| {
-                        if is_dir {
-                            right_label(ui, format_count(u64::from(tree.dir_count(node))));
-                        }
-                    });
-                    row.col(|ui| {
-                        let percent = match tree.parent(node) {
-                            None => format_percent(1, 1),
-                            Some(p) => format_percent(tree.metric(node, metric), tree.metric(p, metric)),
-                        };
-                        right_label(ui, percent);
-                    });
-                    row.col(|ui| right_label(ui, format_date(tree.mtime(node))));
+                    let files = is_dir.then(|| format_count(u64::from(tree.file_count(node))));
+                    let folders = is_dir.then(|| format_count(u64::from(tree.dir_count(node))));
+                    text_cell(&mut row, &ctx, Some(&texts.allocated));
+                    text_cell(&mut row, &ctx, Some(&texts.size));
+                    text_cell(&mut row, &ctx, files.as_deref());
+                    text_cell(&mut row, &ctx, folders.as_deref());
+                    text_cell(&mut row, &ctx, Some(&texts.percent));
+                    text_cell(&mut row, &ctx, Some(&format_date(tree.mtime(node))));
 
                     let response = row.response();
+                    if let Some(item) = item {
+                        // The name is built only while a screen reader (or a test) reads the tree.
+                        let folder = is_dir.then(|| view.is_expanded(node));
+                        item.widget_info(|| {
+                            let name = row_name(tree.name(node), &texts, folder, marker_text(tree.flags(node)));
+                            WidgetInfo::labeled(Role::TreeItem, true, name)
+                        });
+                        let expandable = is_dir && !tree.children(node).is_empty();
+                        ctx.accesskit_node_builder(item.id, |n| {
+                            n.set_selected(selected);
+                            // Zero-based in AccessKit: UI Automation reports the root row as level 1.
+                            n.set_level(r.depth as usize);
+                            if expandable {
+                                n.set_expanded(view.is_expanded(node));
+                            }
+                        });
+                        if selected {
+                            input.selected_item = Some((item.id, response.rect));
+                        }
+                    }
                     if response.clicked() || response.secondary_clicked() {
                         input.select = Some(row.index());
                     }
                     if response.double_clicked() && is_dir {
                         input.toggle = Some(node);
                     }
-                    response.context_menu(|ui| {
-                        if ui.button("Show in Explorer").clicked() {
+                    let popup_id = Popup::default_response_id(&response);
+                    if rows_changed {
+                        Popup::close_id(&ctx, popup_id);
+                    }
+                    // Only on screen: a row drawn just outside the view has no place for the menu.
+                    let open_by_key = menu_for == Some(node) && response.interact_rect.is_positive();
+                    if open_by_key {
+                        Popup::open_id(&ctx, popup_id);
+                        ctx.data_mut(|d| {
+                            d.remove_temp::<(NodeId, u64)>(menu_id);
+                            d.insert_temp(return_id, Vec::<Id>::new());
+                        });
+                    }
+                    // Opened with the keyboard there is no pointer position: the menu goes below the row.
+                    let mut menu = Popup::context_menu(&response).anchor_widget(table);
+                    if !response.secondary_clicked() && Popup::position_of_id(&ctx, popup_id).is_none() {
+                        menu = menu.anchor(&response);
+                    }
+                    menu.show(|ui| {
+                        let explorer = ui.button("Show in Explorer");
+                        if open_by_key {
+                            explorer.request_focus();
+                        }
+                        if explorer.clicked() {
                             win::reveal_in_explorer(&full_path(tree, node));
                             ui.close();
                         }
-                        if ui.button("Copy path").clicked() {
+                        let copy = ui.button("Copy path");
+                        if copy.clicked() {
                             ui.ctx().copy_text(full_path(tree, node));
                             ui.close();
                         }
+                        let entries = vec![explorer.id, copy.id];
+                        ui.ctx().data_mut(|d| {
+                            if d.get_temp::<Vec<Id>>(return_id).is_some() {
+                                d.insert_temp(return_id, entries);
+                            }
+                        });
                     });
                 });
+                if focused && let Some((_, rect)) = input.selected_item {
+                    painter.rect_stroke(rect, 0.0, focus_stroke, StrokeKind::Inside);
+                }
             });
-    });
+        // The column resize handles would be Tab stops and screen reader
+        // regions without a name or a visible focus; the mouse keeps them.
+        let state_id = ui.scope_id().with(IdSalt::new(TABLE_SALT));
+        for i in 0..COLUMNS.len() {
+            let handle = state_id.with("resize_column").with(i);
+            ctx.memory_mut(|m| m.ignore_focus(handle));
+            hide_from_screen_readers(&ctx, handle);
+        }
+    }
+
+    // While the table has the focus, screen readers are on the selected row.
+    if let Some((item, _)) = input.selected_item {
+        ctx.accesskit_node_builder(table, |n| n.set_active_descendant(item.accesskit_id()));
+    }
 
     // The row index belongs to the rows drawn this frame, so select before re-sorting.
     if let Some(index) = input.select {
         view.select_row(index);
+        take_focus = true;
     }
     if let Some(col) = header_click {
         let (key, desc) = next_sort((sort_key, desc), shown, col, metric);
-        view.set_percent_sorted(col == Col::Percent);
         view.set_sort(tree, key, desc);
+        if col == Col::Percent {
+            view.set_percent_sorted(true);
+        }
     }
     if let Some(node) = input.toggle {
         view.toggle(tree, node);
@@ -317,7 +619,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     if changed {
         ctx.request_repaint();
     }
-    TableResponse { selection_changed: view.selected != before }
+    take_focus
 }
 
 #[cfg(test)]
@@ -337,6 +639,29 @@ mod tests {
         let empty = b.push("empty", root, 0, 0, 0, F_DIR); // 7
         b.push("zero.txt", empty, 0, 0, 0, 0); // 8
         b.finish(root).0
+    }
+
+    #[test]
+    fn row_name_lists_the_shown_values() {
+        let texts = RowTexts { allocated: "8.0 KB".into(), size: "1,015 Bytes".into(), percent: "66.7 %".into() };
+        assert_eq!(row_name("a", &texts, None, None), "a, 8.0 KB allocated, 1,015 Bytes size, 66.7 % of parent");
+        assert_eq!(
+            row_name("a", &texts, Some(true), None),
+            "a, 8.0 KB allocated, 1,015 Bytes size, 66.7 % of parent, folder, expanded"
+        );
+        assert_eq!(
+            row_name("a", &texts, Some(false), Some("link")),
+            "a, 8.0 KB allocated, 1,015 Bytes size, 66.7 % of parent, folder, collapsed, link"
+        );
+    }
+
+    #[test]
+    fn row_texts_are_the_formatted_cell_values() {
+        let t = sample();
+        let texts = RowTexts::new(&t, 1, Metric::Allocated);
+        assert_eq!((texts.allocated.as_str(), texts.size.as_str()), ("8.0 KB", "1,015 Bytes"));
+        assert_eq!(texts.percent, "66.7 %");
+        assert_eq!(RowTexts::new(&t, 0, Metric::Size).percent, "100.0 %");
     }
 
     #[test]
@@ -405,13 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn triangle_on_metric_column_follows_the_metric() {
-        // After set_metric(Size) the key is Size, so the triangle moves to Size.
-        assert!(sorted_column(SortKey::Size, Metric::Size, false) == Col::Size);
-        assert!(sorted_column(SortKey::Allocated, Metric::Allocated, false) == Col::Allocated);
-    }
-
-    #[test]
     fn triangle_on_other_clicked_column() {
         let m = Metric::Allocated;
         assert!(sorted_column(SortKey::Name, m, false) == Col::Name);
@@ -427,5 +745,455 @@ mod tests {
         let t = sample();
         assert_eq!(full_path(&t, 0), "C:\\");
         assert_eq!(full_path(&t, 5), "C:\\a\\b\\x");
+    }
+
+    #[test]
+    fn indent_is_capped_at_forty_percent_of_the_column() {
+        assert_eq!(indent_width(0, 300.0), 0.0);
+        assert_eq!(indent_width(3, 300.0), 48.0);
+        assert_eq!(indent_width(70_000, 300.0), 120.0);
+        assert_eq!(indent_width(u32::MAX, 160.0), 64.0);
+        assert_eq!(indent_width(5, -1.0), 0.0);
+    }
+
+    // Headless tests of `show`: egui_kittest drives a plain `egui::Context`
+    // with synthetic input. No window, no renderer, simulated time only.
+    mod ui {
+        use super::*;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+
+        struct State {
+            tree: Tree,
+            view: TreeView,
+            /// Every text the table put on the clipboard.
+            copied: Vec<String>,
+            /// Set: a text field above the table, for the focus rules.
+            text: Option<String>,
+            /// Set: the table is not drawn this frame.
+            hidden: bool,
+        }
+
+        fn harness() -> Harness<'static, State> {
+            harness_with(None)
+        }
+
+        fn harness_with(text: Option<String>) -> Harness<'static, State> {
+            let tree = sample();
+            let view = TreeView::new(&tree, Metric::Allocated);
+            Harness::builder()
+                .with_size(vec2(900.0, 400.0))
+                // Short frames, so two clicks two frames apart are a double-click.
+                .with_step_dt(0.05)
+                .build_ui_state(
+                    |ui, s: &mut State| {
+                        if let Some(text) = &mut s.text {
+                            ui.add(egui::TextEdit::singleline(text).id(text_field_id()).hint_text("Filter"));
+                        }
+                        if !s.hidden {
+                            show(ui, &s.tree, &mut s.view, None);
+                        }
+                        ui.ctx().output(|o| {
+                            for command in &o.commands {
+                                if let egui::OutputCommand::CopyText(t) = command {
+                                    s.copied.push(t.clone());
+                                }
+                            }
+                        });
+                    },
+                    State { tree, view, copied: Vec::new(), text, hidden: false },
+                )
+        }
+
+        fn text_field_id() -> Id {
+            Id::unique("test_text_field")
+        }
+
+        fn focused(h: &Harness<'_, State>) -> Option<Id> {
+            h.ctx.memory(|m| m.focused())
+        }
+
+        fn press(h: &mut Harness<'_, State>, key: Key) {
+            h.key_press(key);
+            h.run();
+        }
+
+        /// Hidden from screen readers: the node or one of its ancestors is hidden.
+        fn hidden(node: &egui_kittest::kittest::AccessKitNode<'_>) -> bool {
+            std::iter::successors(Some(*node), |n| n.parent()).any(|n| n.is_hidden())
+        }
+
+        const ROOT: &str = "C:, 12.0 KB allocated, 1,016 Bytes size, 100.0 % of parent, folder, expanded";
+        const A: &str = "a, 8.0 KB allocated, 1,015 Bytes size, 66.7 % of parent, folder, collapsed";
+        const TOP: &str = "top.txt, 4.0 KB allocated, 1 Bytes size, 33.3 % of parent";
+
+        /// Centre of the label showing `text`.
+        fn label_center(h: &Harness<'_, State>, text: &str) -> Pos2 {
+            h.get_by_label(text).rect().center()
+        }
+
+        /// Centre of the expand arrow in front of the name `text`.
+        fn arrow_center(h: &Harness<'_, State>, text: &str) -> Pos2 {
+            let label = h.get_by_label(text).rect();
+            let gap = h.ctx.global_style().spacing.item_spacing.x;
+            egui::pos2(label.left() - gap - ARROW_WIDTH / 2.0, label.center().y)
+        }
+
+        fn click(h: &mut Harness<'_, State>, pos: Pos2, button: PointerButton) {
+            h.hover_at(pos);
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE });
+            }
+            h.run();
+        }
+
+        #[test]
+        fn click_selects_the_row_and_arrow_down_moves_from_it() {
+            let mut h = harness();
+            assert_eq!(h.state().view.selected, 0);
+            let pos = label_center(&h, "a");
+            click(&mut h, pos, PointerButton::Primary);
+            assert_eq!(h.state().view.selected, 1);
+            h.key_press(Key::ArrowDown);
+            h.run();
+            // Rows: C:, a, empty, top.txt
+            assert_eq!(h.state().view.selected, 7);
+        }
+
+        #[test]
+        fn arrow_click_expands_without_selecting() {
+            let mut h = harness();
+            let pos = arrow_center(&h, "a");
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.is_expanded(1));
+            assert_eq!(h.state().view.selected, 0);
+            assert!(h.query_by_label("big.bin").is_some());
+        }
+
+        #[test]
+        fn header_click_sorts_and_second_click_reverses() {
+            let mut h = harness();
+            let pos = label_center(&h, "Size");
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.sort() == (SortKey::Size, true));
+            // Far apart in time, so the second click is not a double-click.
+            h.run_steps(20);
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.sort() == (SortKey::Size, false));
+        }
+
+        #[test]
+        fn double_click_on_the_arrow_toggles_once() {
+            let mut h = harness();
+            let pos = arrow_center(&h, "a");
+            h.hover_at(pos);
+            for _ in 0..2 {
+                for pressed in [true, false] {
+                    h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                }
+            }
+            h.run();
+            assert!(h.state().view.is_expanded(1));
+            assert_eq!(h.state().view.selected, 0);
+        }
+
+        #[test]
+        fn hovering_a_name_shows_its_full_path() {
+            let mut h = harness();
+            h.state_mut().view.reveal(&sample(), 5);
+            h.run();
+            assert!(h.query_by_label("C:\\a\\b\\x").is_none());
+            let pos = label_center(&h, "x");
+            h.hover_at(pos);
+            // Past the tooltip delay, in simulated time.
+            h.run_steps(20);
+            assert!(h.query_by_label("C:\\a\\b\\x").is_some());
+        }
+
+        #[test]
+        fn context_menu_closes_when_the_rows_change() {
+            let mut h = harness();
+            let pos = label_center(&h, "a");
+            click(&mut h, pos, PointerButton::Secondary);
+            assert!(h.query_by_label("Copy path").is_some());
+            let s = h.state_mut();
+            s.view.toggle(&s.tree, 7); // expands "empty", below the menu's row
+            h.run();
+            assert!(h.query_by_label("Copy path").is_none());
+            assert!(h.query_by_label("zero.txt").is_some());
+        }
+
+        #[test]
+        fn each_row_is_one_tree_item_named_by_what_it_shows() {
+            let h = harness();
+            let root = h.get_by_role_and_label(Role::TreeItem, ROOT);
+            assert_eq!(root.accesskit_node().is_selected(), Some(true));
+            assert_eq!(root.accesskit_node().data().is_expanded(), Some(true));
+            // AccessKit counts levels from 0; UI Automation adds 1, so the root row is level 1.
+            assert_eq!(root.accesskit_node().level(), Some(0));
+            let a = h.get_by_role_and_label(Role::TreeItem, A);
+            assert_eq!(a.accesskit_node().is_selected(), Some(false));
+            assert_eq!(a.accesskit_node().data().is_expanded(), Some(false));
+            assert_eq!(a.accesskit_node().level(), Some(1));
+            // The tree itself is named.
+            assert!(h.query_by_role_and_label(Role::Tree, "Folders").is_some());
+            // A file has no expanded state.
+            let top = h.get_by_role_and_label(Role::TreeItem, TOP);
+            assert_eq!(top.accesskit_node().data().is_expanded(), None);
+            // The cells' own texts are still drawn, but hidden from screen readers.
+            for text in ["a", "8.0 KB", "1,015 Bytes", "66.7 %", "Size"] {
+                let node = h.get_by_label(text);
+                assert!(hidden(&node.accesskit_node()), "{text} is not hidden");
+            }
+            assert!(!hidden(&a.accesskit_node()));
+            // Four rows, four items: C:, a, empty, top.txt.
+            assert_eq!(h.query_all_by_role(Role::TreeItem).count(), 4);
+        }
+
+        #[test]
+        fn marker_ends_the_row_name() {
+            let mut b = TreeBuilder::with_capacity(2, 16);
+            let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR);
+            b.push("locked", root, 0, 0, 0, F_DIR | F_UNREADABLE);
+            let tree = b.finish(root).0;
+            let mut h = harness();
+            let s = h.state_mut();
+            s.view = TreeView::new(&tree, Metric::Allocated);
+            s.tree = tree;
+            h.run();
+            let name = "locked, 0 Bytes allocated, 0 Bytes size, 0.0 % of parent, folder, collapsed, unreadable";
+            assert!(h.query_by_role_and_label(Role::TreeItem, name).is_some());
+        }
+
+        #[test]
+        fn headers_are_buttons_named_sort_by_column() {
+            let mut h = harness();
+            for (_, title) in COLUMNS {
+                assert!(h.query_by_role_and_label(Role::Button, &format!("Sort by {title}")).is_some(), "{title}");
+            }
+            let allocated = h.get_by_role_and_label(Role::Button, "Sort by Allocated");
+            assert_eq!(allocated.accesskit_node().data().sort_direction(), Some(accesskit::SortDirection::Descending));
+            h.get_by_role_and_label(Role::Button, "Sort by Size").click();
+            h.run();
+            assert!(h.state().view.sort() == (SortKey::Size, true));
+        }
+
+        #[test]
+        fn tab_reaches_the_headers_and_enter_or_space_sorts() {
+            let mut h = harness();
+            press(&mut h, Key::Tab);
+            assert_eq!(focused(&h), Some(table_id()));
+            // Name, Allocated, Size.
+            for _ in 0..3 {
+                press(&mut h, Key::Tab);
+            }
+            assert_eq!(focused(&h), Some(header_id(2)));
+            assert!(h.get_by_role_and_label(Role::Button, "Sort by Size").accesskit_node().is_focused());
+            press(&mut h, Key::Enter);
+            assert!(h.state().view.sort() == (SortKey::Size, true));
+            press(&mut h, Key::Space);
+            assert!(h.state().view.sort() == (SortKey::Size, false));
+            // The keys went to the header only: the root is still expanded and selected.
+            assert!(h.state().view.is_expanded(0));
+            assert_eq!(h.state().view.selected, 0);
+            // The arrows move egui's focus between the headers, not the selection.
+            press(&mut h, Key::ArrowRight);
+            assert_eq!(focused(&h), Some(header_id(3)));
+            assert_eq!(h.state().view.selected, 0);
+        }
+
+        #[test]
+        fn tab_after_the_last_header_skips_the_column_resize_handles() {
+            let mut h = harness();
+            // The handles exist, under the ids the table derives for them.
+            let state_id = table_id().with(IdSalt::new(TABLE_SALT));
+            let handle = |i: usize| state_id.with("resize_column").with(i);
+            assert!(h.ctx.read_response(handle(1)).is_some());
+            // Hidden from screen readers, too: an unnamed region per column border otherwise.
+            for i in 0..COLUMNS.len() {
+                let node = h.get_by(|n| n.locate().0 == handle(i).accesskit_id());
+                assert!(node.accesskit_node().is_hidden(), "handle {i}");
+            }
+            // The table, then the seven headers.
+            for _ in 0..8 {
+                press(&mut h, Key::Tab);
+            }
+            assert_eq!(focused(&h), Some(header_id(6)));
+            press(&mut h, Key::Tab);
+            let focus = focused(&h);
+            assert!((0..COLUMNS.len()).all(|i| focus != Some(handle(i))), "{focus:?}");
+            press(&mut h, Key::Tab);
+            assert_eq!(focused(&h), Some(table_id()));
+        }
+
+        #[test]
+        fn with_the_focus_on_the_table_the_arrows_move_the_selection() {
+            let mut h = harness();
+            press(&mut h, Key::Tab);
+            assert_eq!(focused(&h), Some(table_id()));
+            // At the top row: the focus does not jump to the headers above.
+            press(&mut h, Key::ArrowUp);
+            assert_eq!(focused(&h), Some(table_id()));
+            press(&mut h, Key::ArrowDown);
+            assert_eq!(h.state().view.selected, 1);
+            assert_eq!(focused(&h), Some(table_id()));
+            // Screen readers are on the selected row.
+            assert!(h.get_by_role_and_label(Role::TreeItem, A).accesskit_node().is_focused());
+            press(&mut h, Key::ArrowRight);
+            assert!(h.state().view.is_expanded(1));
+            assert_eq!(focused(&h), Some(table_id()));
+        }
+
+        #[test]
+        fn clicking_a_row_gives_the_table_the_focus() {
+            let mut h = harness();
+            let pos = label_center(&h, "a");
+            click(&mut h, pos, PointerButton::Primary);
+            assert_eq!(focused(&h), Some(table_id()));
+            press(&mut h, Key::ArrowUp);
+            assert_eq!(h.state().view.selected, 0);
+            assert_eq!(focused(&h), Some(table_id()));
+        }
+
+        #[test]
+        fn enter_toggles_the_selected_folder() {
+            let mut h = harness();
+            press(&mut h, Key::ArrowDown);
+            assert_eq!(h.state().view.selected, 1);
+            press(&mut h, Key::Enter);
+            assert!(h.state().view.is_expanded(1));
+            assert!(h.query_by_label("big.bin").is_some());
+            let expanded = A.replace("collapsed", "expanded");
+            assert!(h.query_by_role_and_label(Role::TreeItem, &expanded).is_some());
+            press(&mut h, Key::Enter);
+            assert!(!h.state().view.is_expanded(1));
+            // A file: nothing to toggle.
+            press(&mut h, Key::ArrowDown);
+            press(&mut h, Key::ArrowDown);
+            assert_eq!(h.state().view.selected, 6);
+            let rows = h.state().view.rows().len();
+            press(&mut h, Key::Enter);
+            assert_eq!(h.state().view.rows().len(), rows);
+        }
+
+        #[test]
+        fn ctrl_c_copies_the_selected_path() {
+            let mut h = harness();
+            press(&mut h, Key::ArrowDown);
+            // What egui-winit sends for Ctrl+C.
+            h.event(Event::Copy);
+            h.run();
+            assert_eq!(h.state().copied, ["C:\\a"]);
+            press(&mut h, Key::ArrowUp);
+            h.event(Event::Copy);
+            h.run();
+            assert_eq!(h.state().copied, ["C:\\a", "C:\\"]);
+        }
+
+        fn menu_entry(h: &Harness<'_, State>, label: &str) -> bool {
+            h.get_by_label(label).accesskit_node().is_focused()
+        }
+
+        #[test]
+        fn menu_key_opens_the_menu_for_the_selected_row_and_the_keys_work_it() {
+            let mut h = harness();
+            press(&mut h, Key::Tab);
+            press(&mut h, Key::ArrowDown);
+            assert!(h.query_by_label("Copy path").is_none());
+            press(&mut h, Key::Menu);
+            assert!(h.query_by_label("Copy path").is_some());
+            // The first entry has the focus; the arrows move it, Enter runs the entry.
+            assert!(menu_entry(&h, "Show in Explorer"));
+            press(&mut h, Key::ArrowDown);
+            assert!(menu_entry(&h, "Copy path"));
+            assert_eq!(h.state().view.selected, 1, "the arrows went to the menu, not the table");
+            press(&mut h, Key::Enter);
+            assert_eq!(h.state().copied, ["C:\\a"]);
+            assert!(h.query_by_label("Copy path").is_none());
+            // Enter ran the entry only; the folder did not toggle.
+            assert!(!h.state().view.is_expanded(1));
+            // The focus is back on the table.
+            assert_eq!(focused(&h), Some(table_id()));
+        }
+
+        #[test]
+        fn shift_f10_opens_the_menu_and_escape_closes_it() {
+            let mut h = harness();
+            press(&mut h, Key::ArrowDown);
+            h.key_press_modifiers(Modifiers::SHIFT, Key::F10);
+            h.run();
+            assert!(h.query_by_label("Copy path").is_some());
+            press(&mut h, Key::Escape);
+            assert!(h.query_by_label("Copy path").is_none());
+            assert_eq!(focused(&h), Some(table_id()));
+            // F10 without Shift does nothing.
+            press(&mut h, Key::F10);
+            assert!(h.query_by_label("Copy path").is_none());
+        }
+
+        /// A root with 200 files (the table's body is at least 200 points high); the last file is selected but scrolled away.
+        fn long_list() -> Harness<'static, State> {
+            let mut b = TreeBuilder::with_capacity(201, 2048);
+            let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR);
+            for i in 0..200u64 {
+                b.push(&format!("f{i:03}"), root, 1000 - i, 0, 0, 0);
+            }
+            let tree = b.finish(root).0;
+            let mut h = harness();
+            h.set_size(vec2(900.0, 300.0));
+            let s = h.state_mut();
+            s.view = TreeView::new(&tree, Metric::Size);
+            s.view.select_row(200);
+            s.tree = tree;
+            h.run();
+            assert!(h.query_by_label("f199").is_none(), "the selected row is not drawn");
+            h
+        }
+
+        #[test]
+        fn menu_key_on_a_row_scrolled_away_scrolls_to_it_and_opens() {
+            let mut h = long_list();
+            press(&mut h, Key::Menu);
+            assert!(h.query_by_label("f199").is_some());
+            assert!(h.query_by_label("Copy path").is_some());
+        }
+
+        #[test]
+        fn menu_request_is_dropped_when_its_row_is_not_drawn_within_two_frames() {
+            let mut h = long_list();
+            h.key_down(Key::Menu);
+            h.step();
+            // The table is not drawn for a while, so the row cannot be either.
+            h.state_mut().hidden = true;
+            h.run_steps(3);
+            h.state_mut().hidden = false;
+            h.key_up(Key::Menu);
+            h.run();
+            assert!(h.query_by_label("f199").is_some(), "scrolled to the row");
+            assert!(h.query_by_label("Copy path").is_none(), "but the late menu stays closed");
+        }
+
+        #[test]
+        fn a_focused_text_field_keeps_its_keys() {
+            let mut h = harness_with(Some(String::new()));
+            h.ctx.memory_mut(|m| m.request_focus(text_field_id()));
+            h.run();
+            for key in [Key::ArrowDown, Key::Menu] {
+                press(&mut h, key);
+            }
+            h.event(Event::Copy);
+            h.run();
+            assert_eq!(h.state().view.selected, 0);
+            assert!(h.query_by_label("Copy path").is_none());
+            assert!(h.state().copied.iter().all(|t| t != "C:\\"));
+            // Enter makes the field give up the focus, but does not reach the table too.
+            press(&mut h, Key::Enter);
+            assert!(h.state().view.is_expanded(0));
+            assert_eq!(focused(&h), None);
+            // Now the table has the keys.
+            press(&mut h, Key::ArrowDown);
+            assert_eq!(h.state().view.selected, 1);
+        }
     }
 }

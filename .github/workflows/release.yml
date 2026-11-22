@@ -17,15 +17,19 @@ jobs:
     timeout-minutes: 30
     env:
       TAG: ${{ github.ref_name }}
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # The repository is public; tests and build scripts get no token.
+          persist-credentials: false
 
       - name: Check that the tag is on main
         run: |
+          $ErrorActionPreference = 'Stop'
+          # No native-command preference here: "not an ancestor" is an expected non-zero exit.
           git fetch origin main
+          if ($LASTEXITCODE -ne 0) { Write-Error "Could not fetch main"; exit 1 }
           git merge-base --is-ancestor $env:GITHUB_SHA origin/main
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Tag $env:TAG points at a commit that is not on main"
@@ -34,6 +38,8 @@ jobs:
 
       - name: Install stable Rust
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           rustup update stable --no-self-update
           rustup default stable
           rustc --version
@@ -41,6 +47,8 @@ jobs:
 
       - name: Check that the tag matches the package version
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ($env:TAG -ne "v$version") {
             Write-Error "Tag $env:TAG does not match the package version $version in Cargo.toml"
@@ -55,6 +63,8 @@ jobs:
 
       - name: Checksum
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/platzhirsch.exe dist/platzhirsch.exe
           $hash = (Get-FileHash dist/platzhirsch.exe -Algorithm SHA256).Hash.ToLower()
@@ -64,7 +74,9 @@ jobs:
 
       - name: Release notes
         run: |
-          # Take this version's section from the changelog, if there is one.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          # Take this version's section from the changelog; a release without one is refused.
           $version = $env:TAG.TrimStart('v')
           $lines = Get-Content CHANGELOG.md
           $section = @()
@@ -77,25 +89,61 @@ jobs:
             }
             if ($inside -and -not $line.StartsWith("[")) { $section += $line }
           }
+          if (($section -join "").Trim().Length -eq 0) {
+            Write-Error "CHANGELOG.md has no section '## [$version]' with content"
+            exit 1
+          }
+          $download = @()
+          $download += "## Download"
+          $download += ""
+          $download += "``platzhirsch.exe`` is a single file for Windows 10 and 11 (x64). No installer."
+          $download += ""
+          $download += "SHA-256: ``$env:SHA256``"
+          $download += ""
+          $download += "The executable is not code-signed, so Windows SmartScreen may warn on the first start."
+          [IO.File]::WriteAllText("$PWD/dist/download.md", ($download -join "`n") + "`n")
           $notes = @()
-          if ($section.Count -gt 0) { $notes += ($section -join "`n").Trim(); $notes += "" }
-          $notes += "## Download"
+          $notes += ($section -join "`n").Trim()
           $notes += ""
-          $notes += "``platzhirsch.exe`` is a single file for Windows 10 and 11 (x64). No installer."
-          $notes += ""
-          $notes += "SHA-256: ``$env:SHA256``"
-          $notes += ""
-          $notes += "The executable is not code-signed, so Windows SmartScreen may warn on the first start."
+          $notes += $download
           [IO.File]::WriteAllText("$PWD/dist/notes.md", ($notes -join "`n") + "`n")
           Get-Content dist/notes.md
 
       - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          # No native-command preference here: a missing release is an expected non-zero exit.
           gh release view $env:TAG --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            # The release already exists (created by hand): add or replace the files.
-            gh release upload $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --clobber
-          } else {
+          if ($LASTEXITCODE -ne 0) {
             gh release create $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --title "Platzhirsch $env:TAG" --notes-file dist/notes.md --verify-tag
+            exit $LASTEXITCODE
           }
+          # The release already exists (created by hand, or by an earlier run of this workflow):
+          # replace the files and bring the checksum in its notes up to date.
+          gh release upload $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Read gh's output as UTF-8; with the console's default code page, non-ASCII
+          # characters in the existing notes would be damaged when written back. If the
+          # encoding cannot be set, leave the notes alone rather than risk that, and fail:
+          # the files are replaced by now, so the notes still carry the old checksum.
+          try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          } catch {
+            Write-Host "::error::Could not switch the console to UTF-8. The files were replaced, but the release notes still show the old checksum."
+            exit 1
+          }
+          $body =(@(gh release view $env:TAG --json body --jq .body) -join "`n").TrimEnd()
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Only a line in the form this workflow writes (hash in backticks) is replaced;
+          # notes without such a line get the Download section appended.
+          $checksum = "SHA-256: ``$env:SHA256``"
+          if ($body -match 'SHA-256: `[0-9a-f]{64}`') {
+            $updated = $body -replace 'SHA-256: `[0-9a-f]{64}`', $checksum
+          } else {
+            $updated = ($body + "`n`n" + (Get-Content dist/download.md -Raw)).Trim()
+          }
+          [IO.File]::WriteAllText("$PWD/dist/notes-updated.md", $updated + "`n")
+          gh release edit $env:TAG --notes-file dist/notes-updated.md
           exit $LASTEXITCODE

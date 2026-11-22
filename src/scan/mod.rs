@@ -10,16 +10,19 @@ use std::time::Duration;
 use crate::model::Tree;
 use ntfs::NtfsError;
 
+#[derive(Clone)]
 pub enum ScanTarget {
     Volume(char),
     Folder(std::path::PathBuf),
 }
 
 impl ScanTarget {
-    /// A drive root (`C:`, `C:\`, `c:/`) becomes the whole volume, any
-    /// other path a folder.
+    /// A drive root (`C:`, `C:\`, `c:/`, also in the verbatim form `\\?\C:\`)
+    /// becomes the whole volume, any other path a folder.
     pub fn from_path(path: std::path::PathBuf) -> ScanTarget {
         if let Some(s) = path.to_str() {
+            // `\\?\UNC\server\share` has no drive letter after the prefix and stays a folder.
+            let s = s.strip_prefix(r"\\?\").unwrap_or(s);
             let mut chars = s.strip_suffix(['\\', '/']).unwrap_or(s).chars();
             if let (Some(letter), Some(':'), None) = (chars.next(), chars.next(), chars.next())
                 && letter.is_ascii_alphabetic()
@@ -103,7 +106,26 @@ impl fmt::Display for ScanError {
                 f,
                 "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
             ),
-            ScanError::Io(e) => write!(f, "Read error: {e}"),
+            ScanError::Io(e) => match (e.raw_os_error(), e.get_ref()) {
+                // Messages built by this program are English; show them as they are.
+                (None, Some(own)) => write!(f, "Read error: {own}"),
+                (code, _) => {
+                    // Windows' own message text is in the system language, so it is never shown.
+                    let description = match e.kind() {
+                        std::io::ErrorKind::NotFound => "not found",
+                        std::io::ErrorKind::PermissionDenied => "access denied",
+                        std::io::ErrorKind::NotADirectory => "not a folder",
+                        std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
+                        std::io::ErrorKind::InvalidInput => "invalid input",
+                        std::io::ErrorKind::InvalidData => "invalid data",
+                        _ => "I/O error",
+                    };
+                    match code {
+                        Some(code) => write!(f, "Read error: {description} (OS error {code})"),
+                        None => write!(f, "Read error: {description}"),
+                    }
+                }
+            },
             ScanError::Ntfs(e) => {
                 let detail = match e {
                     NtfsError::BadSignature => "invalid signature",
@@ -141,7 +163,19 @@ mod tests {
             assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
         }
         assert!(matches!(target(r"c:\"), ScanTarget::Volume('C')));
-        for folder in [r"C:\DRIVE", r"C:\\", r"\\nas\share", r"\\?\C:\", "1:", "src"] {
+        for root in [r"\\?\C:\", r"\\?\c:", r"\\?\D:/"] {
+            assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
+        }
+        for folder in [
+            r"C:\DRIVE",
+            r"C:\\",
+            r"\\nas\share",
+            r"\\?\C:\DRIVE",
+            r"\\?\UNC\server\share",
+            r"\\?\\C:\",
+            "1:",
+            "src",
+        ] {
             assert!(matches!(target(folder), ScanTarget::Folder(ref p) if p.as_os_str() == folder), "{folder}");
         }
     }
@@ -154,5 +188,25 @@ mod tests {
             ScanError::OnlineOnly.to_string(),
             "This folder is online-only; open it once in Explorer to make it available, then scan again."
         );
+    }
+
+    #[test]
+    fn io_messages_are_english_whatever_the_system_language() {
+        use std::io::{Error, ErrorKind};
+        let text = |e: Error| ScanError::Io(e).to_string();
+        assert_eq!(text(Error::from_raw_os_error(2)), "Read error: not found (OS error 2)");
+        assert_eq!(text(Error::from_raw_os_error(5)), "Read error: access denied (OS error 5)");
+        assert_eq!(text(Error::from_raw_os_error(267)), "Read error: not a folder (OS error 267)");
+        assert_eq!(text(Error::from_raw_os_error(1117)), "Read error: I/O error (OS error 1117)");
+        assert_eq!(text(Error::from(ErrorKind::UnexpectedEof)), "Read error: unexpected end of data");
+        assert_eq!(text(Error::from(ErrorKind::InvalidInput)), "Read error: invalid input");
+        assert_eq!(text(Error::from(ErrorKind::NotADirectory)), "Read error: not a folder");
+        assert_eq!(text(Error::from(ErrorKind::InvalidData)), "Read error: invalid data");
+        assert_eq!(text(Error::from(ErrorKind::TimedOut)), "Read error: I/O error");
+        assert_eq!(
+            text(Error::new(ErrorKind::InvalidData, "Malformed folder listing: entry truncated")),
+            "Read error: Malformed folder listing: entry truncated"
+        );
+        assert_eq!(text(Error::other("Folder listing aborted")), "Read error: Folder listing aborted");
     }
 }

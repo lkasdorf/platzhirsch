@@ -3,6 +3,7 @@
 //! Pure geometry: turns one folder of the in-memory tree into nested
 //! rectangles and answers which rectangle lies under a point. Nothing in
 //! here recurses over tree depth; pending folders live on an explicit stack.
+//! All lengths are in egui points (logical pixels), not physical pixels.
 
 use crate::model::{Metric, NodeId, Tree};
 
@@ -19,63 +20,60 @@ pub struct Tile {
     pub node: NodeId,
     pub rect: Rect,
     pub depth: u8,
+    /// A folder with children of non-zero value of which none got a tile:
+    /// all of them were below [`MIN_SIDE_PT`], or the folder's own tile was
+    /// too small to subdivide.
+    pub elided: bool,
 }
 
-/// Tiles narrower or lower than this are not subdivided further.
-pub const MIN_TILE_PX: f32 = 4.0;
-/// Space for the folder name, reserved when the tile is at least
-/// `HEADER_MIN_W` x `HEADER_MIN_H` px.
-pub const HEADER_PX: f32 = 14.0;
+/// Tiles narrower or lower than this many points are not subdivided further.
+pub const MIN_TILE_PT: f32 = 4.0;
+/// Space for the folder name in points, reserved when the tile is at least
+/// `HEADER_MIN_W` x `HEADER_MIN_H` points.
+pub const HEADER_PT: f32 = 14.0;
 pub const HEADER_MIN_W: f32 = 40.0;
 pub const HEADER_MIN_H: f32 = 28.0;
-pub const PAD_PX: f32 = 1.0;
-/// Tiles whose smaller side is below this are not emitted; their parent's
-/// area stays unsubdivided there.
-pub const MIN_SIDE_PX: f32 = 1.0;
+/// Gap in points between a folder's edge and its children.
+pub const PAD_PT: f32 = 1.0;
+/// Tiles whose smaller side is below this many points are not emitted; their
+/// parent's area stays unsubdivided there.
+pub const MIN_SIDE_PT: f32 = 1.0;
 
 pub fn layout(tree: &Tree, root: NodeId, metric: Metric, bounds: Rect) -> Vec<Tile> {
-    layout_with(tree, root, metric, bounds, HEADER_PX, PAD_PX)
+    layout_with(tree, root, metric, bounds, HEADER_PT, PAD_PT)
 }
 
 /// Squarified layout. Order: parents before children; the first tile is
 /// `root` itself (depth 0, all of `bounds`). Entries with value 0 get no tile,
-/// nor do entries whose tile would be thinner than [`MIN_SIDE_PX`].
+/// nor do entries whose tile would be thinner than [`MIN_SIDE_PT`]. A folder
+/// tile none of whose children of non-zero value got a tile is marked
+/// [`Tile::elided`].
 pub fn layout_with(
     tree: &Tree,
     root: NodeId,
     metric: Metric,
     bounds: Rect,
-    header_px: f32,
-    pad_px: f32,
+    header_pt: f32,
+    pad_pt: f32,
 ) -> Vec<Tile> {
-    let mut out = vec![Tile { node: root, rect: bounds, depth: 0 }];
+    let mut out = vec![Tile { node: root, rect: bounds, depth: 0, elided: false }];
     let finite = bounds.x.is_finite()
         && bounds.y.is_finite()
         && bounds.w.is_finite()
         && bounds.h.is_finite();
     if !finite || bounds.w <= 0.0 || bounds.h <= 0.0 {
+        out[0].elided = has_valued_child(tree, root, metric);
         return out;
     }
     let sane = |v: f32| if v.is_finite() { f64::from(v.max(0.0)) } else { 0.0 };
-    let (header, pad) = (sane(header_px), sane(pad_px));
+    let (header, pad) = (sane(header_pt), sane(pad_pt));
 
-    let mut stack = vec![Tile { node: root, rect: bounds, depth: 0 }];
+    // Indices into `out` of the folder tiles still to subdivide.
+    let mut stack = vec![0usize];
     let mut kids: Vec<(NodeId, u64)> = Vec::new();
-    while let Some(p) = stack.pop() {
-        if !tree.is_dir(p.node) || p.rect.w < MIN_TILE_PX || p.rect.h < MIN_TILE_PX {
-            continue;
-        }
-        let mut area = F64Rect {
-            x: f64::from(p.rect.x) + pad,
-            y: f64::from(p.rect.y) + pad,
-            w: f64::from(p.rect.w) - 2.0 * pad,
-            h: f64::from(p.rect.h) - 2.0 * pad,
-        };
-        if p.rect.w >= HEADER_MIN_W && p.rect.h >= HEADER_MIN_H {
-            area.y += header;
-            area.h -= header;
-        }
-        if !(area.w > 0.0 && area.h > 0.0) {
+    while let Some(at) = stack.pop() {
+        let p = out[at];
+        if !tree.is_dir(p.node) {
             continue;
         }
         kids.clear();
@@ -88,12 +86,49 @@ pub fn layout_with(
             }
         }
         if kids.is_empty() {
-            continue;
+            continue; // empty, or only entries of value 0: nothing is hidden
         }
-        kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        squarify(tree, &kids, total, area, p.depth.saturating_add(1), &mut out, &mut stack);
+        let mut area = F64Rect {
+            x: f64::from(p.rect.x) + pad,
+            y: f64::from(p.rect.y) + pad,
+            w: f64::from(p.rect.w) - 2.0 * pad,
+            h: f64::from(p.rect.h) - 2.0 * pad,
+        };
+        if p.rect.w >= HEADER_MIN_W && p.rect.h >= HEADER_MIN_H {
+            area.y += header;
+            area.h -= header;
+        }
+        let placed = if p.rect.w < MIN_TILE_PT || p.rect.h < MIN_TILE_PT || !(area.w > 0.0 && area.h > 0.0) {
+            0
+        } else {
+            kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            squarify(tree, &kids, total, area, p.depth.saturating_add(1), &mut out, &mut stack)
+        };
+        out[at].elided = placed == 0;
     }
     out
+}
+
+fn has_valued_child(tree: &Tree, node: NodeId, metric: Metric) -> bool {
+    tree.is_dir(node) && tree.children(node).iter().any(|&c| tree.metric(c, metric) > 0)
+}
+
+/// The strip at the top of a folder tile that [`layout`] reserves for the
+/// folder's name, or `None` if the tile is too small to have one.
+pub fn header_strip(tree: &Tree, tile: &Tile) -> Option<Rect> {
+    let r = tile.rect;
+    (tree.is_dir(tile.node) && r.w >= HEADER_MIN_W && r.h >= HEADER_MIN_H).then_some(Rect {
+        x: r.x + PAD_PT,
+        y: r.y + PAD_PT,
+        w: r.w - 2.0 * PAD_PT,
+        h: HEADER_PT,
+    })
+}
+
+impl Rect {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -105,7 +140,8 @@ struct F64Rect {
 }
 
 /// Places `kids` (sorted by value, descending, all > 0) into `area` row by
-/// row. Every placed tile goes to `out`; folders are queued on `stack`.
+/// row. Every placed tile goes to `out`; folders are queued on `stack` by
+/// their index in `out`. Returns how many tiles were placed.
 fn squarify(
     tree: &Tree,
     kids: &[(NodeId, u64)],
@@ -113,18 +149,19 @@ fn squarify(
     area: F64Rect,
     depth: u8,
     out: &mut Vec<Tile>,
-    stack: &mut Vec<Tile>,
-) {
+    stack: &mut Vec<usize>,
+) -> usize {
+    let placed_before = out.len();
     let F64Rect { mut x, mut y, mut w, mut h } = area;
     let mut remaining = total;
     let mut i = 0;
     while i < kids.len() && w > 0.0 && h > 0.0 {
         // Every tile placed in the rest of the area is at most `min(w, h)`
         // across, so once that is below the cut-off no further tile is emitted.
-        if w.min(h) < f64::from(MIN_SIDE_PX) {
+        if w.min(h) < f64::from(MIN_SIDE_PT) {
             break;
         }
-        let scale = w * h / remaining as f64; // pixels² per unit of value
+        let scale = w * h / remaining as f64; // points² per unit of value
         let side = w.min(h);
         let largest = kids[i].1 as f64 * scale;
 
@@ -162,7 +199,8 @@ fn squarify(
         for (k, &(node, value)) in kids[i..j].iter().enumerate() {
             let last_item = i + k + 1 == j;
             let len = if last_item {
-                row_len - offset
+                // Rounding can leave `offset` a hair above `row_len`.
+                (row_len - offset).max(0.0)
             } else {
                 row_len * (value as f64 / row_value as f64)
             };
@@ -172,18 +210,14 @@ fn squarify(
                 F64Rect { x: x + offset, y, w: len, h: thick }
             };
             offset += len;
-            if r.w.min(r.h) < f64::from(MIN_SIDE_PX) {
+            let rect = Rect { x: r.x as f32, y: r.y as f32, w: r.w as f32, h: r.h as f32 };
+            if rect.w.is_nan() || rect.h.is_nan() || rect.w.min(rect.h) < MIN_SIDE_PT {
                 continue;
             }
-            let tile = Tile {
-                node,
-                rect: Rect { x: r.x as f32, y: r.y as f32, w: r.w as f32, h: r.h as f32 },
-                depth,
-            };
-            out.push(tile);
             if tree.is_dir(node) {
-                stack.push(tile);
+                stack.push(out.len());
             }
+            out.push(Tile { node, rect, depth, elided: false });
         }
 
         if wide {
@@ -196,16 +230,19 @@ fn squarify(
         remaining -= row_value;
         i = j;
     }
+    out.len() - placed_before
 }
 
 /// The deepest tile under the point. Parents precede their children in
-/// `tiles` and siblings are disjoint, so this is the last tile containing it.
+/// `tiles` and siblings are disjoint up to rounding, so this is the last tile
+/// containing it.
 pub fn hit_test(tiles: &[Tile], x: f32, y: f32) -> Option<NodeId> {
-    tiles
-        .iter()
-        .rev()
-        .find(|t| x >= t.rect.x && x < t.rect.x + t.rect.w && y >= t.rect.y && y < t.rect.y + t.rect.h)
-        .map(|t| t.node)
+    hit_index(tiles, x, y).map(|i| tiles[i].node)
+}
+
+/// Like [`hit_test`], but the index of the tile in `tiles`.
+pub fn hit_index(tiles: &[Tile], x: f32, y: f32) -> Option<usize> {
+    tiles.iter().rposition(|t| t.rect.contains(x, y))
 }
 
 #[cfg(test)]
@@ -273,6 +310,22 @@ mod tests {
         }
     }
 
+    /// The part of a folder tile its children are laid out in: minus the
+    /// padding and, where one is reserved, minus the header.
+    fn content(parent: Rect) -> Rect {
+        let mut r = Rect {
+            x: parent.x + PAD_PT,
+            y: parent.y + PAD_PT,
+            w: parent.w - 2.0 * PAD_PT,
+            h: parent.h - 2.0 * PAD_PT,
+        };
+        if parent.w >= HEADER_MIN_W && parent.h >= HEADER_MIN_H {
+            r.y += HEADER_PT;
+            r.h -= HEADER_PT;
+        }
+        r
+    }
+
     #[test]
     fn tiles_inside_parent_and_disjoint() {
         let t = sample();
@@ -280,9 +333,11 @@ mod tests {
         assert!(tiles.len() > 4);
         let by_node: HashMap<NodeId, Rect> = tiles.iter().map(|x| (x.node, x.rect)).collect();
         for tile in &tiles[1..] {
-            let parent = t.parent(tile.node).unwrap();
-            assert!(inside(tile.rect, by_node[&parent]), "node {} outside parent", tile.node);
+            let parent = by_node[&t.parent(tile.node).unwrap()];
+            assert!(inside(tile.rect, content(parent)), "node {} outside its parent's content", tile.node);
         }
+        // At least one parent here reserves a header, so the check above covers it.
+        assert!(tiles.iter().any(|x| header_strip(&t, x).is_some()));
         for (i, a) in tiles.iter().enumerate().skip(1) {
             for b in &tiles[i + 1..] {
                 if t.parent(a.node) == t.parent(b.node) {
@@ -336,8 +391,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_pixel_tiles_are_not_emitted() {
-        // One big file and 100,000 tiny ones: each tiny one would be far below 1 px.
+    fn sub_point_tiles_are_not_emitted() {
+        // One big file and 100,000 tiny ones: each tiny one would be far below 1 point.
         let mut sizes = vec![1_000_000_000];
         sizes.extend(std::iter::repeat_n(1, 100_000));
         let t = flat(&sizes);
@@ -345,7 +400,7 @@ mod tests {
         assert!(tiles.iter().any(|x| x.node == 1), "the big file keeps its tile");
         assert!(tiles.len() < 100, "{} tiles", tiles.len());
         for tile in &tiles {
-            assert!(tile.rect.w.min(tile.rect.h) >= MIN_SIDE_PX, "node {}: {:?}", tile.node, tile.rect);
+            assert!(tile.rect.w.min(tile.rect.h) >= MIN_SIDE_PT, "node {}: {:?}", tile.node, tile.rect);
         }
     }
 
@@ -363,8 +418,74 @@ mod tests {
         let tiles = layout_with(&t, root, Metric::Size, rect(1000.0, 1000.0), 0.0, 0.0);
         assert_eq!(tiles.len(), DEPTH as usize + 1);
         assert_eq!(tiles.last().unwrap().depth, 255);
-        // With the default padding the chain stops once tiles get too small.
+        assert!(tiles.iter().all(|x| !x.elided));
+        // With the default padding the chain stops once tiles get too small;
+        // the last folder laid out still has content, so it is marked.
         let small = layout(&t, root, Metric::Size, rect(1000.0, 1000.0));
         assert!(small.len() < 1000);
+        let last = small.last().unwrap();
+        assert!(t.is_dir(last.node) && last.elided);
+        assert!(small[..small.len() - 1].iter().all(|x| !x.elided));
+    }
+
+    #[test]
+    fn folder_of_tiny_files_is_elided() {
+        // 100,000 one-byte files in a 300 x 200 panel: each would get about 0.55 points².
+        let t = flat(&vec![1; 100_000]);
+        let tiles = layout(&t, 0, Metric::Size, rect(300.0, 200.0));
+        assert_eq!(tiles.len(), 1, "no child tiles");
+        assert_eq!(tiles[0].node, 0);
+        assert!(tiles[0].elided);
+        for tile in &tiles {
+            let r = tile.rect;
+            assert!(!(r.x.is_nan() || r.y.is_nan() || r.w.is_nan() || r.h.is_nan()), "{r:?}");
+        }
+        assert_eq!(hit_test(&tiles, 150.0, 100.0), Some(0));
+    }
+
+    #[test]
+    fn elided_only_where_content_is_hidden() {
+        // Empty folders and folders whose children all have value 0 hide nothing.
+        for t in [&flat(&[]), &flat(&[0, 0, 0])] {
+            assert!(!layout(t, 0, Metric::Size, rect(500.0, 500.0))[0].elided);
+            assert!(!layout(t, 0, Metric::Size, rect(2.0, 2.0))[0].elided);
+        }
+        // Everything fits: nothing is marked. Files are never marked.
+        let t = sample();
+        let tiles = layout(&t, 0, Metric::Size, rect(800.0, 300.0));
+        assert!(tiles.iter().all(|x| !x.elided), "{tiles:?}");
+        // Too small to subdivide, and no area at all.
+        assert!(layout(&t, 0, Metric::Size, rect(3.0, 3.0))[0].elided);
+        assert!(layout(&t, 0, Metric::Size, rect(0.0, 100.0))[0].elided);
+        // A file shown as root (not a folder) is not marked.
+        assert!(!layout(&t, 2, Metric::Size, rect(3.0, 3.0))[0].elided);
+    }
+
+    #[test]
+    fn header_strip_only_on_large_folder_tiles() {
+        let t = sample();
+        let folder = Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 }, depth: 1, elided: false };
+        assert_eq!(
+            header_strip(&t, &folder),
+            Some(Rect { x: 10.0 + PAD_PT, y: 20.0 + PAD_PT, w: 100.0 - 2.0 * PAD_PT, h: HEADER_PT })
+        );
+        let small = Tile { rect: Rect { x: 0.0, y: 0.0, w: HEADER_MIN_W - 1.0, h: 50.0 }, ..folder };
+        assert_eq!(header_strip(&t, &small), None);
+        let file = Tile { node: 2, ..folder };
+        assert_eq!(header_strip(&t, &file), None);
+    }
+
+    #[test]
+    fn no_tile_below_the_minimum_side_or_not_finite() {
+        let mut sizes: Vec<u64> = (1..=3000).map(|i| (i * 7919) % 10_007 + 1).collect();
+        sizes.extend([1_000_000, 3, 3, 3]);
+        let t = flat(&sizes);
+        for (w, h) in [(800.0, 300.0), (37.0, 1013.0), (1.5, 999.0), (333.3, 77.7)] {
+            for tile in layout(&t, 0, Metric::Size, rect(w, h)).iter().skip(1) {
+                let r = tile.rect;
+                assert!(r.x.is_finite() && r.y.is_finite(), "{r:?}");
+                assert!(r.w >= MIN_SIDE_PT && r.h >= MIN_SIDE_PT, "{r:?}");
+            }
+        }
     }
 }

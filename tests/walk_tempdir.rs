@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
 
 use platzhirsch::model::{F_DIR, F_LINK, F_UNREADABLE, NodeId, Tree};
 use platzhirsch::scan::walk::scan_walk;
@@ -47,6 +48,87 @@ fn tree_with_junction() {
     assert!(t.mtime(f1) > 0);
     let expected_root = tmp.path().to_string_lossy().trim_end_matches('\\').to_string();
     assert_eq!(t.name(t.root()), expected_root);
+}
+
+/// Runs `mklink` with `kind` (`/J`, `/D` or none for a file symbolic link).
+/// Returns false if Windows refused it (symbolic links need a privilege
+/// that an unelevated shell has only with Developer Mode on). With the
+/// environment variable `CI` set, a refused link fails the test instead, so
+/// the test cannot pass there without asserting anything.
+fn mklink(kind: Option<&str>, link: &Path, target: &Path) -> bool {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", "mklink"]);
+    if let Some(kind) = kind {
+        cmd.arg(kind);
+    }
+    let out = cmd.arg(link).arg(target).output().expect("run mklink");
+    if !out.status.success() && std::env::var_os("CI").is_some() {
+        panic!("mklink {kind:?} failed in CI: {out:?}");
+    }
+    out.status.success()
+}
+
+/// A folder `target` with one file and a subfolder, inside `tmp`.
+fn link_target(tmp: &Path) -> PathBuf {
+    let target = tmp.join("target");
+    fs::create_dir_all(target.join("sub")).unwrap();
+    write_file(&target.join("f"), 10);
+    write_file(&target.join("sub").join("g"), 20);
+    target
+}
+
+fn assert_scanned_as_target(root: &Path) {
+    let r = scan_walk(root, &Progress::default()).unwrap_or_else(|e| panic!("{}: {e}", root.display()));
+    let t = &r.tree;
+    assert_eq!(t.name(t.root()), root.to_string_lossy().trim_end_matches('\\'));
+    assert_eq!(t.flags(t.root()) & F_LINK, 0);
+    assert_eq!((t.size(t.root()), t.file_count(t.root()), t.dir_count(t.root())), (30, 2, 1));
+    assert_eq!(t.size(child(t, t.root(), "f")), 10);
+    assert_eq!((r.unreadable, r.online_only), (0, 0));
+}
+
+#[test]
+fn junction_root_is_scanned_as_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = link_target(tmp.path());
+    let j = tmp.path().join("j");
+    assert!(mklink(Some("/J"), &j, &target), "mklink /J failed");
+    assert_scanned_as_target(&j);
+    // A link higher up in the path is resolved as well.
+    let outer = tmp.path().join("outer");
+    assert!(mklink(Some("/J"), &outer, tmp.path()), "mklink /J failed");
+    assert_scanned_as_target(&outer.join("target"));
+}
+
+#[test]
+fn symbolic_link_root_is_scanned_as_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = link_target(tmp.path());
+    let link = tmp.path().join("dirlink");
+    if !mklink(Some("/D"), &link, &target) {
+        eprintln!("skipped dirlink: this environment may not create symbolic links");
+        return;
+    }
+    assert_scanned_as_target(&link);
+}
+
+/// Windows does not resolve a symbolic link that was created as a file link
+/// but points to a folder (seen on the build server: the open that follows
+/// the link fails). Such a root is refused like a file, and nothing is listed.
+#[test]
+fn file_link_to_a_folder_is_refused_as_not_a_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = link_target(tmp.path());
+    let link = tmp.path().join("filelink");
+    if !mklink(None, &link, &target) {
+        eprintln!("skipped filelink: this environment may not create symbolic links");
+        return;
+    }
+    match scan_walk(&link, &Progress::default()) {
+        Err(ScanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory, "{e}"),
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => panic!("a file link to a folder was scanned"),
+    }
 }
 
 #[test]
@@ -103,18 +185,20 @@ fn cancel_while_walking() {
     let limit = std::time::Duration::from_secs(10);
     let mut cancelled = false;
     for _attempt in 0..5 {
-        let progress = Progress::default();
-        let started = std::time::Instant::now();
-        let result = std::thread::scope(|s| {
-            s.spawn(|| {
-                while progress.done.load(Ordering::Relaxed) == 0 && started.elapsed() < limit {
-                    std::hint::spin_loop();
-                }
-                progress.cancel.store(true, Ordering::Relaxed);
-            });
-            scan_walk(tmp.path(), &progress)
+        let progress = Arc::new(Progress::default());
+        let (tx, rx) = mpsc::channel();
+        // The scan runs in its own thread, so a scan that never returns fails
+        // this test after the time limit instead of hanging the test run.
+        let (root, scan_progress) = (tmp.path().to_path_buf(), Arc::clone(&progress));
+        std::thread::spawn(move || {
+            let _ = tx.send(scan_walk(&root, &scan_progress));
         });
-        assert!(started.elapsed() < limit, "scan did not return in time");
+        let started = std::time::Instant::now();
+        while progress.done.load(Ordering::Relaxed) == 0 && started.elapsed() < limit {
+            std::hint::spin_loop();
+        }
+        progress.cancel.store(true, Ordering::Relaxed);
+        let result = rx.recv_timeout(limit).expect("scan did not return in time");
         match result {
             Err(ScanError::Cancelled) => {
                 cancelled = true;
@@ -136,6 +220,20 @@ fn file_root_is_not_opened() {
     match scan_walk(&file, &Progress::default()) {
         Err(ScanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory),
         other => panic!("expected Io(NotADirectory), got {:?}", other.err()),
+    }
+}
+
+#[test]
+fn device_paths_are_refused() {
+    for root in [r"\\.\C:", r"\\.\PhysicalDrive0", r"\\.\C:\Windows", "//./C:"] {
+        match scan_walk(Path::new(root), &Progress::default()) {
+            Err(e @ ScanError::Io(_)) => {
+                let ScanError::Io(io) = &e else { unreachable!() };
+                assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput, "{root}");
+                assert_eq!(e.to_string(), "Read error: Device paths are not supported", "{root}");
+            }
+            other => panic!("{root}: expected Io(InvalidInput), got {:?}", other.err()),
+        }
     }
 }
 
@@ -182,6 +280,7 @@ fn denied_root_is_access_denied_without_admin_hint() {
         other => panic!("expected FolderAccessDenied, got {:?}", other.err()),
     }
     drop(guard);
+    tmp.close().expect("temp folder not removed after the ACL was restored");
 }
 
 #[test]
@@ -212,4 +311,5 @@ fn unreadable_dir_is_marked() {
     assert_eq!(r.unreadable, 1);
     drop(guard);
     assert!(fs::read_dir(&locked).is_ok(), "ACL was not restored");
+    tmp.close().expect("temp folder not removed after the ACL was restored");
 }

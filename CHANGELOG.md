@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
+### Added
+
+- After Cancel the top bar shows `Cancelling…` and the Cancel button stays disabled until
+  the scan has stopped, which can take a moment on a network share.
+- When the restart with administrator rights is declined or fails, the elevation notice
+  says "Administrator rights were not granted."
+- A click on the name strip at the top of the treemap goes up to the parent of the folder
+  shown; the strip's tooltip says "Click to go up". At the drive or folder scanned there is
+  no parent, and the click selects that entry in the table.
+- Screen readers can read the window: every control has a name, each table row is read as
+  one item with its name, sizes, share and whether a folder is expanded, and the treemap
+  is named after the folder it shows.
+- New keys in the folder table: Enter expands or collapses the selected folder, the Menu
+  key or Shift+F10 opens its context menu, and Ctrl+C copies its path. Tab reaches the
+  table and the column headers, which sort with Space or Enter.
+- `platzhirsch.exe` carries the app's icon and version information, so Explorer shows the
+  pie icon and the Details tab lists product name, description, version and copyright.
+
+### Changed
+
+- The notice that the fast scan needs administrator rights no longer hides a scan result
+  that is on screen; the result stays visible below it.
+- An unexpected fault inside a scan now ends only that scan, with the message "The scan
+  ended unexpectedly.", instead of closing the program. After a fast scan that ended this
+  way, the slow scan is offered.
+- The copy started with administrator rights uses the same working folder as the first
+  one when that folder is on a local fixed drive.
+- Folders in the treemap whose content is too small to draw are shown in a darker shade;
+  their tooltip says how many entries are inside.
+- Hovering in the treemap lightens only what is under the pointer: over a folder its name
+  strip, over a file its tile.
+- The treemap is drawn as one prepared shape instead of tile by tile in every frame. While
+  it is resized, the last layout is stretched to fit and laid out anew only when the size
+  has stayed the same for 150 ms.
+- A drive given in the long form `\\?\C:\` is scanned as the whole drive, like `C:`.
+- Continuous integration runs for pushes to `main` and for pull requests against `main`.
+  The actions it uses are pinned to exact commits.
+- The release workflow refuses a tag that is not on `main`, a tag that does not match the
+  package version, and a version without a section in this changelog. The release notes
+  are taken from that section.
+
+### Fixed
+
+- "Copy path" now copies to the Windows clipboard; in 0.1.0 the path never left the
+  program.
+- Tab no longer stops at every table cell; the table is one stop, and while it has the
+  focus the arrow keys move the selection instead of the focus. While a context menu is
+  open the arrow keys move within the menu only.
+- The drive list is read again each time it is opened, so a drive plugged in after the
+  start appears without a restart.
+- The window no longer redraws continuously while a scan runs; the progress indicator is
+  a text that changes four times a second.
+- Sizes just below a unit boundary are shown in the next unit, so 1,048,575 Bytes reads
+  `1.0 MB` instead of `1,024.0 KB`.
+- Read errors are shown in English, with the cause and the Windows error code, instead of
+  in the language of the system.
+- Drives whose Master File Table extents are recorded out of order, or with sectors larger
+  than 4 KB, are no longer rejected (tested on synthetic images).
+- Stale records beyond the initialized part of the Master File Table no longer appear as
+  entries (tested on synthetic images).
+- Entries whose reparse data is stored outside their file record can now be marked as
+  links (tested on synthetic images).
+- If the memory for the tables of a very large Master File Table cannot be reserved, the
+  scan ends with an error instead of ending the program.
+- A Master File Table that is recorded as lying outside the drive is rejected as damaged
+  instead of being read.
+- A junction or directory symbolic link chosen as the scan target is scanned as the folder
+  it points to, also when the link sits higher up in the path.
+- Device paths such as `\\.\C:` are refused with the message "Device paths are not
+  supported" instead of an unclear read error.
+- The check for online-only cloud folders now looks at every folder on the path of the
+  scan target, not only at the chosen folder. For a `subst` drive or a mapped network
+  drive it also looks at the folder the drive points to.
+- "Show in Explorer" starts Explorer from the Windows folder only, and starts nothing for
+  a name that contains a double quote.
+- A folder scan whose file names would need more than 4 GiB of memory stops with an error.
+- Names of deeply nested entries stay readable in the folder table: the indentation takes
+  at most 40 % of the Name column. Hovering a name shows the entry's full path.
+- A double-click on the expand arrow of a folder expands or collapses it once instead of
+  twice.
+- In very deep folder trees (more than 65,535 levels), the left arrow key now selects the
+  real parent folder.
+- An open context menu closes when the rows of the table change, so it can no longer act
+  on a row that has moved.
+
 ## [0.1.0] - 2026-11-22
 
 First release.
@@ -63,5 +150,6 @@ First release.
 - Release workflow: pushing a tag `vX.Y.Z` builds on Windows and attaches
   `platzhirsch.exe` with its SHA-256 checksum to the GitHub release.
 
-[Unreleased]: https://github.com/lkasdorf/platzhirsch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lkasdorf/platzhirsch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lkasdorf/platzhirsch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lkasdorf/platzhirsch/releases/tag/v0.1.0
