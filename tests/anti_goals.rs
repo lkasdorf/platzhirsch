@@ -12,6 +12,11 @@ const BANNED_WRITE: &[&str] = &[
     "FILE_WRITE_DATA",
     "FILE_APPEND_DATA",
     "FILE_WRITE_ATTRIBUTES",
+    "FILE_WRITE_EA",
+    "FILE_ADD_FILE",
+    "FILE_ADD_SUBDIRECTORY",
+    "FILE_DELETE_CHILD",
+    "FILE_ALL_ACCESS",
     "WRITE_DAC",
     "WRITE_OWNER",
     "WriteFile",
@@ -27,9 +32,9 @@ const BANNED_WRITE: &[&str] = &[
     "DeviceIoControl",
     "NtCreateFile",
     "CreateFile",
-    "CreateDirectoryW",
-    "CreateHardLinkW",
-    "CreateSymbolicLinkW",
+    "CreateDirectory",
+    "CreateHardLink",
+    "CreateSymbolicLink",
     "remove_file",
     "remove_dir",
     "fs::write",
@@ -53,10 +58,16 @@ const BANNED_WRITE: &[&str] = &[
     ".truncate(true)",
     "\"cmd\"",
     "cmd.exe",
-    "powershell",
-    // Spawning a process is allowlisted, not free (see `ALLOWED`).
+    // Starting a process is allowlisted, not free (see `ALLOWED`).
     "Command::new",
+    "process::Command",
+    "ShellExecute",
+    "CreateProcess",
+    "WinExec",
 ];
+
+/// Banned regardless of case (`powershell`, `PowerShell`, ...).
+const BANNED_NOCASE: &[&str] = &["powershell"];
 
 /// Network access: banned in `src/` and among the `windows` crate features.
 const BANNED_NETWORK: &[&str] = &["std::net", "Win32_Networking"];
@@ -75,6 +86,14 @@ const ALLOWED: &[(&str, &str, usize)] = &[
     // Test fixture in `#[cfg(test)]` code: a file in a fresh temp folder.
     ("src/scan/walk.rs", "std::fs::write(&file, b\"abc\").unwrap();", 1),
     // The one place that starts a process: Explorer, to reveal an entry.
+    ("src/win.rs", "use std::os::windows::process::CommandExt;", 1), // the extension trait for `raw_arg`
+    ("src/win.rs", "use windows::Win32::UI::Shell::ShellExecuteW;", 1), // import for the restart as administrator
+    (
+        "src/win.rs",
+        "let result = unsafe { ShellExecuteW(None, w!(\"runas\"), &exe, &params, dir_ptr, SW_SHOWNORMAL) };",
+        1,
+    ), // restarts the program itself with administrator rights
+    ("src/win.rs", "// ShellExecuteW reports success with a value above 32.", 1), // comment on that call
     (
         "src/win.rs",
         "let _ = std::process::Command::new(\"explorer.exe\").raw_arg(format!(\"/select,\\\"{path}\\\"\")).spawn();",
@@ -102,6 +121,7 @@ const MASK_CALLS: &[&str] = &["NtOpenFile", "CreateFileW"];
 
 struct Rules<'a> {
     substrings: &'a [&'a str],
+    nocase: &'a [&'a str],
     words: &'a [&'a str],
 }
 
@@ -118,10 +138,12 @@ fn contains_word(line: &str, word: &str) -> bool {
 fn check(file: &str, text: &str, rules: &Rules, allowed: &[(&str, &str, usize)], counts: &mut [usize]) -> Vec<String> {
     let mut found = Vec::new();
     for (n, line) in text.lines().enumerate() {
+        let lower = line.to_lowercase();
         let hits: Vec<&str> = rules
             .substrings
             .iter()
             .filter(|w| line.contains(**w))
+            .chain(rules.nocase.iter().filter(|w| lower.contains(**w)))
             .chain(rules.words.iter().filter(|w| contains_word(line, w)))
             .copied()
             .collect();
@@ -146,6 +168,20 @@ fn allowlist_errors(allowed: &[(&str, &str, usize)], counts: &[usize]) -> Vec<St
         .filter(|((_, _, want), got)| want != *got)
         .map(|((file, line, want), got)| format!("allowlist entry {file}: `{line}` expected {want} time(s), found {got}"))
         .collect()
+}
+
+/// True if `arg` contains a numeric-literal token: a digit that starts a
+/// token, i.e. is not preceded by an identifier character or `.` (so
+/// `access.0` and `mask2` are clean, `A | 0x2`, `(0x1)`, `1 << 30` are not).
+fn contains_numeric_literal(arg: &str) -> bool {
+    let mut prev: Option<char> = None;
+    for c in arg.chars() {
+        if c.is_ascii_digit() && !prev.is_some_and(|p| p.is_alphanumeric() || p == '_' || p == '.') {
+            return true;
+        }
+        prev = Some(c);
+    }
+    false
 }
 
 /// True if `arg` is a numeric literal: `0x..`, `0b..`, `0o..` or decimal, with
@@ -191,7 +227,7 @@ fn call_args(args: &str) -> Vec<String> {
 }
 
 /// Reports a call to `NtOpenFile` or `CreateFileW` whose access argument (the
-/// second one) is a numeric literal. Looks at the line of the call and the two
+/// second one) contains a numeric literal, alone or combined with names. Looks at the line of the call and the two
 /// after it, without `//` comments. A literal in any other argument or in a
 /// comment is not reported.
 fn numeric_access_masks(file: &str, text: &str) -> Vec<String> {
@@ -207,8 +243,23 @@ fn numeric_access_masks(file: &str, text: &str) -> Vec<String> {
                 window.push(' ');
                 window.push_str(&code(next));
             }
-            if call_args(&window).get(1).is_some_and(|a| is_numeric_literal(a)) {
+            if call_args(&window).get(1).is_some_and(|a| contains_numeric_literal(a)) {
                 found.push(format!("{file}:{}: numeric access mask in `{call}`", n + 1));
+            }
+        }
+    }
+    found
+}
+
+/// Reports `FILE_ACCESS_RIGHTS(` followed by a numeric literal: building an
+/// access mask from a number, wherever the mask is later used.
+fn numeric_access_rights(file: &str, text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        for (i, _) in code.match_indices("FILE_ACCESS_RIGHTS(") {
+            if contains_numeric_literal(call_args(&code[i + "FILE_ACCESS_RIGHTS(".len()..]).first().map_or("", |a| a.as_str())) {
+                found.push(format!("{file}:{}: numeric literal in `FILE_ACCESS_RIGHTS(`", n + 1));
             }
         }
     }
@@ -242,7 +293,7 @@ fn no_write_delete_or_network_calls_in_source() {
     collect_rs_files(&root.join("src"), &mut files);
     assert!(!files.is_empty(), "no source files found under src/");
     let substrings: Vec<&str> = BANNED_WRITE.iter().chain(BANNED_NETWORK).copied().collect();
-    let rules = Rules { substrings: &substrings, words: BANNED_WORDS };
+    let rules = Rules { substrings: &substrings, nocase: BANNED_NOCASE, words: BANNED_WORDS };
     let mut counts = vec![0usize; ALLOWED.len()];
     let mut found = Vec::new();
     for file in &files {
@@ -250,6 +301,7 @@ fn no_write_delete_or_network_calls_in_source() {
         let text = fs::read_to_string(file).expect("read source");
         found.extend(check(&name, &text, &rules, ALLOWED, &mut counts));
         found.extend(numeric_access_masks(&name, &text));
+        found.extend(numeric_access_rights(&name, &text));
     }
     assert!(found.is_empty(), "banned text in src/:\n{}", found.join("\n"));
     let errors = allowlist_errors(ALLOWED, &counts);
@@ -260,14 +312,14 @@ fn no_write_delete_or_network_calls_in_source() {
 fn no_network_features_in_manifest() {
     let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read Cargo.toml");
     assert!(manifest.contains("name = \"platzhirsch\""), "Cargo.toml looks wrong");
-    let rules = Rules { substrings: BANNED_NETWORK, words: &[] };
+    let rules = Rules { substrings: BANNED_NETWORK, nocase: &[], words: &[] };
     let found = check("Cargo.toml", &manifest, &rules, &[], &mut []);
     assert!(found.is_empty(), "network feature in Cargo.toml:\n{}", found.join("\n"));
 }
 
 #[test]
 fn checker_reports_banned_text_and_skips_allowed_lines() {
-    let rules = Rules { substrings: BANNED_WRITE, words: BANNED_WORDS };
+    let rules = Rules { substrings: BANNED_WRITE, nocase: BANNED_NOCASE, words: BANNED_WORDS };
     let allowed = [("src/x.rs", "std::fs::write(p, b\"ok\")?;", 1)];
     let text = "fn a() {\n    std::fs::write(p, b\"ok\")?;\n    let f = File::create(p)?;\n    let m = DELETE;\n    let s = FILE_SHARE_DELETE;\n}\n";
     let mut counts = [0];
@@ -290,7 +342,7 @@ fn checker_reports_banned_text_and_skips_allowed_lines() {
 
 #[test]
 fn allowlist_counts_must_match_exactly() {
-    let rules = Rules { substrings: BANNED_WRITE, words: BANNED_WORDS };
+    let rules = Rules { substrings: BANNED_WRITE, nocase: BANNED_NOCASE, words: BANNED_WORDS };
     let allowed = [("src/x.rs", "std::fs::write(p, b)?;", 1)];
     let line = "    std::fs::write(p, b)?;\n";
     for (text, ok) in [(line.to_string(), true), (line.repeat(2), false), (String::new(), false)] {
@@ -303,7 +355,7 @@ fn allowlist_counts_must_match_exactly() {
 
 #[test]
 fn checker_flags_new_write_and_process_rules() {
-    let rules = Rules { substrings: BANNED_WRITE, words: BANNED_WORDS };
+    let rules = Rules { substrings: BANNED_WRITE, nocase: BANNED_NOCASE, words: BANNED_WORDS };
     let hit = |line: &str| check("src/x.rs", line, &rules, &[], &mut []).len();
     for banned in [
         "CreateDirectoryW(p, None)",
@@ -349,8 +401,58 @@ fn numeric_access_mask_rule() {
         numeric_access_masks("src/x.rs", "a\nb\n  NtOpenFile(&mut h, 5, &a)"),
         ["src/x.rs:3: numeric access mask in `NtOpenFile`"]
     );
+    for masked in [
+        "NtOpenFile(&mut h, FILE_READ_ATTRIBUTES.0 | 0x100000, &a)",
+        "NtOpenFile(&mut h, (A | 0x2).0, &a)",
+        "NtOpenFile(&mut h, 0x1 as u32, &a)",
+        "NtOpenFile(&mut h, (0x1), &a)",
+        "NtOpenFile(&mut h, 1 << 30, &a)",
+    ] {
+        assert_eq!(numeric_access_masks("src/x.rs", masked).len(), 1, "not reported: {masked}");
+    }
+    for clean in [
+        "NtOpenFile(&mut h, access.0, &a)",
+        "NtOpenFile(&mut h, FILE_LIST_DIRECTORY | SYNCHRONIZE, &a)",
+        "NtOpenFile(&mut h, rights.0 | other.0, &a)",
+        "NtOpenFile(&mut h, mask2, &a)",
+        "NtOpenFile(&mut h, FILE_SHARE_READ2, &a)",
+    ] {
+        assert!(numeric_access_masks("src/x.rs", clean).is_empty(), "reported: {clean}");
+    }
     assert!(is_numeric_literal("0x80_10u32") && is_numeric_literal("12") && is_numeric_literal("0b101"));
     assert!(!is_numeric_literal("FILE_LIST_DIRECTORY.0") && !is_numeric_literal("access.0") && !is_numeric_literal("0xZZ"));
+}
+
+#[test]
+fn access_rights_literal_and_new_bans() {
+    assert_eq!(numeric_access_rights("src/x.rs", "let a = FILE_ACCESS_RIGHTS(0x2);").len(), 1);
+    assert_eq!(numeric_access_rights("src/x.rs", "let a = FILE_ACCESS_RIGHTS(1 << 3);").len(), 1);
+    assert!(numeric_access_rights("src/x.rs", "let a = FILE_ACCESS_RIGHTS(bits);").is_empty());
+    assert!(numeric_access_rights("src/x.rs", "let a = FILE_ACCESS_RIGHTS(self.0);").is_empty());
+
+    let rules = Rules { substrings: BANNED_WRITE, nocase: BANNED_NOCASE, words: BANNED_WORDS };
+    let hit = |line: &str| check("src/x.rs", line, &rules, &[], &mut []).len();
+    for banned in [
+        "ShellExecuteW(None)",
+        "CreateProcessW(a)",
+        "WinExec(a, 1)",
+        "use std::process::Command;",
+        "CreateDirectoryExW(a)",
+        "CreateHardLinkA(a)",
+        "CreateSymbolicLinkW(a)",
+        "FILE_WRITE_EA",
+        "FILE_ADD_FILE",
+        "FILE_ADD_SUBDIRECTORY",
+        "FILE_DELETE_CHILD",
+        "FILE_ALL_ACCESS",
+        "run(\"powershell\")",
+        "run(\"PowerShell\")",
+    ] {
+        assert!(hit(banned) >= 1, "not reported: {banned}");
+    }
+    for fine in ["let p = Process::new();", "let a = FILE_ADD;", "let s = \"shell\";"] {
+        assert_eq!(hit(fine), 0, "reported: {fine}");
+    }
 }
 
 #[test]
