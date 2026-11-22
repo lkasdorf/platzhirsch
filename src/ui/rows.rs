@@ -105,7 +105,8 @@ impl TreeView {
         }
     }
 
-    fn selected_row(&self) -> usize {
+    /// The row index of the selection.
+    pub fn selected_row(&self) -> usize {
         self.row(self.selected).unwrap_or(0)
     }
 

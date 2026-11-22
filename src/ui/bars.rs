@@ -12,6 +12,8 @@ use crate::win::VolumeInfo;
 
 const CANCELLING: &str = "Cancelling…";
 const NOT_GRANTED: &str = "Administrator rights were not granted.";
+/// The accessible name of the drive list.
+const DRIVE_LIST_NAME: &str = "Drive or folder to scan";
 
 /// What the user asked for in the top bar; applied by [`App`] after drawing.
 pub(super) enum Action {
@@ -114,7 +116,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App, now: Instant) -> Option<
     ui.horizontal(|ui| {
         let list_open = ui
             .add_enabled_ui(!scanning, |ui| {
-                egui::ComboBox::from_id_salt("target")
+                let list = egui::ComboBox::from_id_salt("target")
                     .width(220.0)
                     .selected_text(target_label(app))
                     .show_ui(ui, |ui| {
@@ -124,9 +126,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App, now: Instant) -> Option<
                                 action = Some(Action::SelectVolume(v.letter));
                             }
                         }
-                    })
-                    .inner
-                    .is_some()
+                    });
+                // Nothing visible names the list; its value is the chosen drive or folder.
+                let _ = list.response.accessible_name(DRIVE_LIST_NAME);
+                list.inner.is_some()
             })
             .inner;
         if list_open && !app.drive_list_open {
@@ -145,10 +148,18 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App, now: Instant) -> Option<
             action = Some(Action::Scan);
         }
         ui.separator();
-        ui.label("Show:");
-        let allocated = ui.radio_value(&mut app.metric, Metric::Allocated, "Allocated");
-        let size = ui.radio_value(&mut app.metric, Metric::Size, "Size");
-        if allocated.changed() || size.changed() {
+        // One group named `Show` for screen readers; the visible `Show:` says the same.
+        let group = egui::UiBuilder::new().accessibility_role(egui::Role::RadioGroup).accessibility_label("Show");
+        let metric_changed = ui
+            .scope_builder(group, |ui| {
+                let label = ui.label("Show:");
+                ui.ctx().accesskit_node_builder(label.id, |node| node.set_hidden());
+                let allocated = ui.radio_value(&mut app.metric, Metric::Allocated, "Allocated");
+                let size = ui.radio_value(&mut app.metric, Metric::Size, "Size");
+                allocated.changed() || size.changed()
+            })
+            .inner;
+        if metric_changed {
             action = Some(Action::MetricChanged);
         }
         ui.separator();
@@ -282,7 +293,7 @@ mod tests {
     mod ui {
         use super::*;
         use crate::ui::{ElevationHint, ScanOutcome};
-        use eframe::egui::vec2;
+        use eframe::egui::{Role, vec2};
         use egui_kittest::Harness;
         use egui_kittest::kittest::{NodeT, Queryable};
         use std::sync::{Arc, mpsc};
@@ -298,8 +309,6 @@ mod tests {
         fn harness(app: App, now: Instant, scan: Option<mpsc::Sender<ScanOutcome>>) -> Harness<'static, State> {
             Harness::builder()
                 .with_size(vec2(1000.0, 200.0))
-                // The drive list has no accessible name yet; names are the accessibility task's.
-                .with_accessibility_check(false)
                 .build_ui_state(
                 |ui, s: &mut State| {
                     if let Some(action) = top_bar(ui, &mut s.app, s.now) {
@@ -397,6 +406,35 @@ mod tests {
             let (one, two, three) = (count_left(0), count_left(250), count_left(500));
             assert_eq!(one, three);
             assert_eq!(two, three);
+        }
+
+        #[test]
+        fn every_control_of_the_top_bar_has_a_name() {
+            let volumes = vec![VolumeInfo { letter: 'C', fs_name: "NTFS".into(), total: 1 << 40, free: 1 << 39 }];
+            let mut h = harness(App::with_volumes(volumes), Instant::now(), None);
+            h.run();
+            // The drive list: its name, and the chosen drive as its value.
+            let list = h.get_by_role_and_label(Role::ComboBox, "Drive or folder to scan");
+            assert_eq!(list.accesskit_node().value().as_deref(), Some("C:  NTFS  1.0 TB"));
+            for button in ["Folder\u{2026}", "Scan"] {
+                assert!(h.query_by_role_and_label(Role::Button, button).is_some(), "{button}");
+            }
+            // The `Show` choices: one group with two radio buttons.
+            let group = h.get_by_role_and_label(Role::RadioGroup, "Show");
+            let choices: Vec<_> = group.query_all_by_role(Role::RadioButton).map(|n| n.accesskit_node().label()).collect();
+            assert_eq!(choices, [Some("Allocated".to_string()), Some("Size".to_string())]);
+            // The treemap switch tells whether it is on.
+            let switch = h.get_by_role_and_label(Role::Button, "Treemap");
+            assert_eq!(switch.accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
+            // Picking a choice by its name works like a click.
+            h.get_by_role_and_label(Role::RadioButton, "Size").click();
+            h.run();
+            assert!(matches!(h.state().last, Some(Action::MetricChanged)));
+            assert!(h.state().app.metric == Metric::Size);
+            h.get_by_role_and_label(Role::ComboBox, "Drive or folder to scan").click();
+            h.run();
+            assert!(matches!(h.state().last, Some(Action::DriveListOpened)));
+            assert!(h.query_by_label("C:  NTFS  1.0 TB").is_some());
         }
 
         #[test]

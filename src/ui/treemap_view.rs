@@ -10,9 +10,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use eframe::egui::{
+    Align2, Color32, FontId, Mesh, Pos2, Rect, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2, vec2,
+};
 
 use super::rows::TreeView;
+use super::table::full_path;
 use crate::format::{format_bytes, format_count};
 use crate::model::{Metric, NodeId, Tree};
 use crate::treemap::{self, HEADER_PT, Tile, header_strip, hit_index, hit_test, layout};
@@ -271,7 +274,11 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
     }
     let (area, mut response) = ui.allocate_exact_size(size, Sense::CLICK);
     let metric = view.metric();
-    let laid = cache.update(tree, shown_node(tree, view.selected), metric, area.width(), area.height(), now)?;
+    let shown = shown_node(tree, view.selected);
+    // One image for screen readers; it has no keyboard access of its own and
+    // follows the table's selection. The name is built only while they read.
+    response.widget_info(|| WidgetInfo::labeled(Role::Image, true, format!("Treemap of {}", full_path(tree, shown))));
+    let laid = cache.update(tree, shown, metric, area.width(), area.height(), now)?;
     if let Some(wait) = laid.settle_in {
         // Nothing else may cause a frame once the user stops dragging.
         ui.ctx().request_repaint_after(wait);
@@ -579,6 +586,7 @@ mod tests {
         use super::*;
         use eframe::egui::{Event, PointerButton, ViewportId};
         use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
 
         struct State {
             tree: Tree,
@@ -603,8 +611,6 @@ mod tests {
             let state = State { tree, view, cache: TreemapCache::default(), now: Instant::now(), clicked: None };
             Harness::builder()
                 .with_size(vec2(800.0, 300.0))
-                // The treemap's click area has no accessible name; names are the accessibility task's.
-                .with_accessibility_check(false)
                 .build_ui_state(
                     |ui, s: &mut State| {
                         if let Some(n) = show(ui, &s.tree, &s.view, &mut s.cache, s.now) {
@@ -633,6 +639,19 @@ mod tests {
             h.run();
             assert_eq!(h.state().cache.computations(), 1);
             assert_eq!(h.state().cache.mesh_builds, 1);
+        }
+
+        #[test]
+        fn treemap_is_one_image_named_by_the_folder_it_shows() {
+            let mut h = harness();
+            h.run();
+            assert!(h.query_by_role_and_label(Role::Image, "Treemap of C:\\a").is_some());
+            // It follows the table's selection: a file shows its folder, the root gets its backslash.
+            let s = h.state_mut();
+            s.view.reveal(&s.tree, 2_002);
+            h.run();
+            assert!(h.query_by_role_and_label(Role::Image, "Treemap of C:\\").is_some());
+            assert!(h.query_by_role_and_label(Role::Image, "Treemap of C:\\a").is_none());
         }
 
         #[test]

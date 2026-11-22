@@ -12,7 +12,7 @@ categories = ["filesystem", "visualization"]
 publish = false
 
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
 egui_extras = "0.37.0"
 rayon = "1.12.0"
 rfd = "0.18.0"

@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A click on the name strip at the top of the treemap goes up to the parent of the folder
   shown, whose tooltip then says "Click to go up". At the drive or folder scanned there is
   no parent and the strip does nothing.
+- Screen readers can read the window: every control has a name, each table row is read as
+  one item with its name, sizes, share and whether a folder is expanded, and the treemap
+  is named after the folder it shows.
+- New keys in the folder table: Enter expands or collapses the selected folder, the Menu
+  key or Shift+F10 opens its context menu, and Ctrl+C copies its path. Tab reaches the
+  table and the column headers, which sort with Space or Enter.
 
 ### Changed
 
@@ -32,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tab no longer stops at every table cell; the table is one stop, and while it has the
+  focus the arrow keys move the selection instead of the focus. While a context menu is
+  open the arrow keys move within the menu only.
 - The drive list is read again each time it is opened, so a drive plugged in after the
   start appears without a restart.
 - The window no longer redraws continuously while a scan runs; the progress indicator is

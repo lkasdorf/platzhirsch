@@ -92,6 +92,11 @@ Start `platzhirsch.exe`, choose a drive or a folder and press "Scan". For a whol
 drive the app offers to restart as administrator for the fast scan, or to scan slowly
 without it.
 
+In the folder table the arrow keys move the selection and open or close folders, Enter
+expands or collapses the selected folder, the Menu key or Shift+F10 opens its menu, and
+Ctrl+C copies its path. Tab reaches the table and each column header, where Space or Enter
+sorts.
+
 A scan can also be started from the command line:
 
 ```powershell
@@ -138,7 +143,11 @@ The design document and the implementation plan are in
   appears there.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
-- The window cannot be read by screen readers.
+- Screen readers get the names of all controls and of each table row through the Windows
+  accessibility interface (UI Automation), and the table can be used fully from the
+  keyboard. This was checked through the accessibility tree, not with every screen
+  reader. The treemap has no keyboard navigation of its own; it follows the table's
+  selection. The divider between table and treemap cannot be moved with the keyboard.
 - The executable is not code-signed, so Windows SmartScreen may warn on the first start.
 
 ## License
