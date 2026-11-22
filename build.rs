@@ -1,6 +1,7 @@
 //! Embeds the icon and the version information in `platzhirsch.exe`, for the Windows
-//! MSVC target only; on other targets this does nothing. `bench.exe` and the test
-//! programs get neither. Needs the Windows SDK's resource compiler `rc.exe`.
+//! MSVC target only; on other targets this does nothing. `bench.exe` and the library
+//! and integration test programs get neither. Needs the Windows SDK's resource
+//! compiler `rc.exe`.
 use std::env;
 
 fn main() {
@@ -26,6 +27,9 @@ fn main() {
         .set("Comments", "MIT License");
     // Linked through `cargo:rustc-link-arg-bin=platzhirsch=...`: only this binary.
     if let Err(e) = res.compile_for("platzhirsch") {
-        panic!("embedding the icon and version information failed: {e}");
+        panic!(
+            "could not compile the Windows resources (icon and version information): {e}. \
+             Is the Windows SDK with its resource compiler rc.exe installed?"
+        );
     }
 }
