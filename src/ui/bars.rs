@@ -1,17 +1,22 @@
 //! Top bar and status bar of the main window.
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use super::{App, Phase};
+use super::{App, Phase, SCAN_REPAINT};
 use crate::format::{format_bytes, format_count};
 use crate::model::Metric;
-use crate::scan::{ScanMethod, ScanResult, ScanTarget};
+use crate::scan::{Progress, ScanMethod, ScanResult, ScanTarget};
 use crate::win::VolumeInfo;
+
+const CANCELLING: &str = "Cancelling…";
+const NOT_GRANTED: &str = "Administrator rights were not granted.";
 
 /// What the user asked for in the top bar; applied by [`App`] after drawing.
 pub(super) enum Action {
+    /// The drive list was just opened: read it again.
+    DriveListOpened,
     SelectVolume(char),
     PickFolder,
     Scan,
@@ -25,6 +30,22 @@ pub(super) enum Action {
 pub(super) fn format_seconds(d: Duration) -> String {
     let tenths = (d.as_millis() + 50) / 100;
     format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+/// `Scanning` with one to three dots, one more every [`SCAN_REPAINT`] of `elapsed`.
+pub(super) fn scanning_text(elapsed: Duration) -> String {
+    let step = elapsed.as_millis() / SCAN_REPAINT.as_millis();
+    let dots = (step % 3) as usize + 1;
+    format!("Scanning{}", ".".repeat(dots))
+}
+
+/// What a running scan shows: `Cancelling…` once Cancel was pressed, else the dots.
+pub(super) fn scan_indicator(progress: &Progress, elapsed: Duration) -> String {
+    if progress.cancel.load(Ordering::Relaxed) {
+        CANCELLING.to_string()
+    } else {
+        scanning_text(elapsed)
+    }
 }
 
 /// A drive as shown in the drive list, e.g. `C:  NTFS  3.7 TB`.
@@ -70,29 +91,41 @@ pub fn status_text(result: &ScanResult, volume: Option<&VolumeInfo>) -> String {
 }
 
 /// Drive list, folder picker, scan button, metric switch, treemap toggle,
-/// progress and the elevation / error notice.
-pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
+/// progress and the elevation / error notice. `now` is the clock for the elapsed time.
+pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App, now: Instant) -> Option<Action> {
     let mut action = None;
-    let scanning = matches!(app.phase, Phase::Scanning { .. });
+    let (scanning, cancelling) = match &app.phase {
+        Phase::Scanning { progress, .. } => (true, progress.cancel.load(Ordering::Relaxed)),
+        _ => (false, false),
+    };
     ui.horizontal(|ui| {
-        ui.add_enabled_ui(!scanning, |ui| {
-            egui::ComboBox::from_id_salt("target")
-                .width(220.0)
-                .selected_text(target_label(app))
-                .show_ui(ui, |ui| {
-                    for v in &app.volumes {
-                        let selected = matches!(app.target, Some(ScanTarget::Volume(l)) if l == v.letter);
-                        if ui.selectable_label(selected, volume_label(v)).clicked() {
-                            action = Some(Action::SelectVolume(v.letter));
+        let list_open = ui
+            .add_enabled_ui(!scanning, |ui| {
+                egui::ComboBox::from_id_salt("target")
+                    .width(220.0)
+                    .selected_text(target_label(app))
+                    .show_ui(ui, |ui| {
+                        for v in &app.volumes {
+                            let selected = matches!(app.target, Some(ScanTarget::Volume(l)) if l == v.letter);
+                            if ui.selectable_label(selected, volume_label(v)).clicked() {
+                                action = Some(Action::SelectVolume(v.letter));
+                            }
                         }
-                    }
-                });
-        });
+                    })
+                    .inner
+                    .is_some()
+            })
+            .inner;
+        if list_open && !app.drive_list_open {
+            action = Some(Action::DriveListOpened);
+        }
+        app.drive_list_open = list_open;
         if ui.add_enabled(!scanning && app.folder_rx.is_none(), egui::Button::new("Folder…")).clicked() {
             action = Some(Action::PickFolder);
         }
         if scanning {
-            if ui.button("Cancel").clicked() {
+            // Disabled after Cancel until the scan thread has ended.
+            if ui.add_enabled(!cancelling, egui::Button::new("Cancel")).clicked() {
                 action = Some(Action::Cancel);
             }
         } else if ui.add_enabled(app.target.is_some(), egui::Button::new("Scan")).clicked() {
@@ -109,48 +142,49 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) -> Option<Action> {
         ui.toggle_value(&mut app.show_treemap, "Treemap");
         if let Phase::Scanning { progress, started, method, .. } = &app.phase {
             ui.separator();
+            let elapsed = now.saturating_duration_since(*started);
             let done = progress.done.load(Ordering::Relaxed);
-            match method {
-                ScanMethod::Mft => {
-                    let total = progress.total.load(Ordering::Relaxed);
-                    let fraction = if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) as f32 };
-                    ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).show_percentage());
-                }
-                ScanMethod::Walk => {
-                    ui.spinner();
-                    ui.label(format!("{} entries found", format_count(done)));
+            if cancelling {
+                ui.label(CANCELLING);
+            } else {
+                match method {
+                    ScanMethod::Mft => {
+                        let total = progress.total.load(Ordering::Relaxed);
+                        let fraction = if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) as f32 };
+                        ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).show_percentage());
+                    }
+                    ScanMethod::Walk => {
+                        ui.label(scanning_text(elapsed));
+                        ui.label(format!("{} entries found", format_count(done)));
+                    }
                 }
             }
-            ui.weak(format!("{} s", format_seconds(started.elapsed())));
+            ui.weak(format!("{} s", format_seconds(elapsed)));
         }
     });
-    match &app.phase {
-        Phase::AskElevation(letter) => {
-            ui.horizontal(|ui| {
-                ui.label("The fast scan needs administrator rights.");
-                if ui.button("Restart as administrator").clicked() {
-                    action = Some(Action::Relaunch(*letter));
-                }
-                if ui.button("Scan slowly").clicked() {
-                    action = Some(Action::SlowScan(ScanTarget::Volume(*letter)));
-                }
-            });
+    if let Some(hint) = app.hint {
+        ui.horizontal(|ui| {
+            ui.label("The fast scan needs administrator rights.");
+            if ui.button("Restart as administrator").clicked() {
+                action = Some(Action::Relaunch(hint.letter));
+            }
+            if ui.button("Scan slowly").clicked() {
+                action = Some(Action::SlowScan(ScanTarget::Volume(hint.letter)));
+            }
+        });
+        if hint.relaunch_failed {
+            ui.colored_label(ui.visuals().error_fg_color, NOT_GRANTED);
         }
-        Phase::Failed { message, offer_walk } => {
-            ui.horizontal(|ui| {
-                ui.colored_label(ui.visuals().error_fg_color, message);
-                if let Some(target) = offer_walk
-                    && ui.button("Scan slowly").clicked()
-                {
-                    let target = match target {
-                        ScanTarget::Volume(letter) => ScanTarget::Volume(*letter),
-                        ScanTarget::Folder(path) => ScanTarget::Folder(path.clone()),
-                    };
-                    action = Some(Action::SlowScan(target));
-                }
-            });
-        }
-        _ => {}
+    }
+    if let Phase::Failed { message, offer_walk } = &app.phase {
+        ui.horizontal(|ui| {
+            ui.colored_label(ui.visuals().error_fg_color, message);
+            if let Some(target) = offer_walk
+                && ui.button("Scan slowly").clicked()
+            {
+                action = Some(Action::SlowScan(target.clone()));
+            }
+        });
     }
     action
 }
@@ -207,5 +241,143 @@ mod tests {
         result.online_only = 1;
         let s = status_text(&result, None);
         assert_eq!(s, "12 files | Folder scan, allocated approximate, 0.8 s | 2 unreadable | 1 online-only");
+    }
+
+    #[test]
+    fn scanning_dots_follow_the_clock() {
+        let text = |ms| scanning_text(Duration::from_millis(ms));
+        assert_eq!(text(0), "Scanning.");
+        assert_eq!(text(249), "Scanning.");
+        assert_eq!(text(250), "Scanning..");
+        assert_eq!(text(500), "Scanning...");
+        assert_eq!(text(750), "Scanning.");
+        assert_eq!(text(u64::MAX), scanning_text(Duration::from_millis(u64::MAX)));
+    }
+
+    #[test]
+    fn fixed_texts() {
+        assert_eq!(CANCELLING, "Cancelling\u{2026}");
+        assert_eq!(NOT_GRANTED, "Administrator rights were not granted.");
+        let progress = Progress::default();
+        assert_eq!(scan_indicator(&progress, Duration::ZERO), "Scanning.");
+        progress.cancel.store(true, Ordering::Relaxed);
+        assert_eq!(scan_indicator(&progress, Duration::ZERO), "Cancelling\u{2026}");
+    }
+
+    // Headless tests of `top_bar`: no window, no renderer, and the clock is passed in.
+    mod ui {
+        use super::*;
+        use crate::ui::{ElevationHint, ScanOutcome};
+        use eframe::egui::vec2;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        use std::sync::{Arc, mpsc};
+
+        struct State {
+            app: App,
+            now: Instant,
+            last: Option<Action>,
+            /// Stands for the scan thread, which has not ended yet.
+            _scan: Option<mpsc::Sender<ScanOutcome>>,
+        }
+
+        fn harness(app: App, now: Instant, scan: Option<mpsc::Sender<ScanOutcome>>) -> Harness<'static, State> {
+            Harness::builder()
+                .with_size(vec2(1000.0, 200.0))
+                // The drive list has no accessible name yet; names are the accessibility task's.
+                .with_accessibility_check(false)
+                .build_ui_state(
+                |ui, s: &mut State| {
+                    if let Some(action) = top_bar(ui, &mut s.app, s.now) {
+                        if matches!(action, Action::Cancel) {
+                            s.app.cancel_scan();
+                        }
+                        s.last = Some(action);
+                    }
+                },
+                State { app, now, last: None, _scan: scan },
+            )
+        }
+
+        /// A folder walk that has run for `elapsed_ms`.
+        fn scanning(elapsed_ms: u64) -> Harness<'static, State> {
+            let (tx, rx) = mpsc::channel();
+            let started = Instant::now();
+            let mut app = App::with_volumes(Vec::new());
+            app.phase = Phase::Scanning {
+                progress: Arc::new(Progress::default()),
+                rx,
+                started,
+                method: ScanMethod::Walk,
+                target: ScanTarget::Folder("x".into()),
+            };
+            harness(app, started + Duration::from_millis(elapsed_ms), Some(tx))
+        }
+
+        fn cancel_disabled(h: &Harness<'_, State>) -> bool {
+            h.get_by_label("Cancel").accesskit_node().is_disabled()
+        }
+
+        fn cancel_requested(h: &Harness<'_, State>) -> bool {
+            matches!(&h.state().app.phase, Phase::Scanning { progress, .. } if progress.cancel.load(Ordering::Relaxed))
+        }
+
+        #[test]
+        fn running_scan_shows_dots_and_elapsed_time() {
+            let mut h = scanning(600);
+            h.run();
+            assert!(h.query_by_label("Scanning...").is_some());
+            assert!(h.query_by_label("0 entries found").is_some());
+            assert!(h.query_by_label("0.6 s").is_some());
+            assert!(!cancel_disabled(&h));
+        }
+
+        #[test]
+        fn cancel_shows_cancelling_and_disables_the_button() {
+            let mut h = scanning(600);
+            h.run();
+            h.get_by_label("Cancel").click();
+            h.run();
+            assert!(cancel_requested(&h));
+            assert!(h.query_by_label("Cancelling\u{2026}").is_some());
+            assert!(h.query_by_label("Scanning...").is_none());
+            assert!(cancel_disabled(&h));
+            // A second Cancel does nothing: the button is disabled and the state stays.
+            h.state_mut().last = None;
+            h.get_by_label("Cancel").click();
+            h.run();
+            assert!(h.state().last.is_none());
+            assert!(cancel_requested(&h));
+            assert!(h.query_by_label("Cancelling\u{2026}").is_some());
+            assert!(cancel_disabled(&h));
+        }
+
+        fn with_hint(relaunch_failed: bool) -> Harness<'static, State> {
+            let mut app = App::with_volumes(Vec::new());
+            app.hint = Some(ElevationHint { letter: 'D', relaunch_failed });
+            let mut h = harness(app, Instant::now(), None);
+            h.run();
+            h
+        }
+
+        #[test]
+        fn hint_buttons_act_on_the_hint_drive() {
+            let mut h = with_hint(false);
+            assert!(h.query_by_label("The fast scan needs administrator rights.").is_some());
+            assert!(h.query_by_label("Administrator rights were not granted.").is_none());
+            h.get_by_label("Restart as administrator").click();
+            h.run();
+            assert!(matches!(h.state().last, Some(Action::Relaunch('D'))));
+            h.get_by_label("Scan slowly").click();
+            h.run();
+            assert!(matches!(h.state().last, Some(Action::SlowScan(ScanTarget::Volume('D')))));
+        }
+
+        #[test]
+        fn failed_relaunch_says_so() {
+            let h = with_hint(true);
+            assert!(h.query_by_label("The fast scan needs administrator rights.").is_some());
+            assert!(h.query_by_label("Administrator rights were not granted.").is_some());
+        }
     }
 }

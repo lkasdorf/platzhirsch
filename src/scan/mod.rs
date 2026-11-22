@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::model::Tree;
 use ntfs::NtfsError;
 
+#[derive(Clone)]
 pub enum ScanTarget {
     Volume(char),
     Folder(std::path::PathBuf),

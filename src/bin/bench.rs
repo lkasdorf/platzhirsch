@@ -1,16 +1,18 @@
 //! Diagnostic tool:
 //! - `bench mft <X:> [--out <file>]` measures the MFT scan,
 //! - `bench walk <path> [--out <file>]` measures the directory walk,
-//! - `bench compare <folder> [--out <file>]` compares both for one folder.
+//! - `bench compare <folder> [--out <file>]` compares both for one folder,
+//! - `bench message-box` shows the box a failed start of the program shows.
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use platzhirsch::model::{SortKey, Tree};
 use platzhirsch::scan::mft::scan_mft;
 use platzhirsch::scan::walk::scan_walk;
 use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget};
-use platzhirsch::win::{long_path_name, memory_mb, volume_info};
+use platzhirsch::win::{long_path_name, memory_mb, show_error, volume_info};
 
-const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]";
+const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]
+       bench message-box";
 const TOP_CHILDREN: usize = 15;
 
 enum Command {
@@ -179,6 +181,11 @@ fn compare(folder: &Path, out: Option<&str>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["message-box"] {
+        // The same box as a failed start in `src/main.rs`, so that it can be looked at.
+        show_error("Platzhirsch", "Platzhirsch could not start: test");
+        return;
+    }
     let Some((command, out)) = parse_args(&args) else {
         eprintln!("{USAGE}");
         std::process::exit(2);

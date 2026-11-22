@@ -171,12 +171,17 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
-/// Starts this program again with admin rights (UAC prompt). `Err` if declined or failed.
+/// Starts this program again with admin rights (UAC prompt), in the current working
+/// directory. `Err` if declined or failed.
 pub fn relaunch_elevated(args: &[String]) -> std::io::Result<()> {
     let exe = HSTRING::from(std::env::current_exe()?.as_os_str());
     let params = HSTRING::from(args.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" "));
-    // SAFETY: all strings are NUL-terminated and outlive the call; no window handle is passed.
-    let result = unsafe { ShellExecuteW(None, w!("runas"), &exe, &params, PCWSTR::null(), SW_SHOWNORMAL) };
+    // Without a readable working directory Windows picks one, as before.
+    let dir = std::env::current_dir().ok().map(|d| HSTRING::from(d.as_os_str()));
+    let dir_ptr = dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
+    // SAFETY: all strings are NUL-terminated and outlive the call (`dir` lives until the end
+    // of the function); no window handle is passed.
+    let result = unsafe { ShellExecuteW(None, w!("runas"), &exe, &params, dir_ptr, SW_SHOWNORMAL) };
     // ShellExecuteW reports success with a value above 32.
     if result.0 as usize > 32 {
         Ok(())

@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- After Cancel the top bar shows `Cancelling…` and the Cancel button stays disabled until
+  the scan has stopped, which can take a moment on a network share.
+- When the restart with administrator rights is declined or fails, the elevation notice
+  says "Administrator rights were not granted."
+
+### Changed
+
+- The notice that the fast scan needs administrator rights no longer hides a scan result
+  that is on screen; the result stays visible below it.
+- An unexpected fault inside a scan now ends only that scan, with the message "The scan
+  ended unexpectedly.", instead of closing the program.
+- The copy started with administrator rights uses the same working folder as the first
+  one.
+
 ### Fixed
+
+- The drive list is read again each time it is opened, so a drive plugged in after the
+  start appears without a restart.
+- The window no longer redraws continuously while a scan runs; the progress indicator is
+  a text that changes four times a second.
 
 - Sizes just below a unit boundary are shown in the next unit, so 1,048,575 Bytes reads
   `1.0 MB` instead of `1,024.0 KB`.

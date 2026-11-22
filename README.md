@@ -132,8 +132,8 @@ The design document and the implementation plan are in
   whose parent cannot be listed. When the path goes through a link, Windows resolves the
   link before the folders behind it can be checked, so a link that points into an
   online-only folder can still make the provider fetch that folder's entry.
-- The drive list is read once when the program starts. A drive plugged in later appears
-  after a restart.
+- The drive list is read again each time it is opened, so a drive plugged in later
+  appears there.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
 - The window cannot be read by screen readers.
