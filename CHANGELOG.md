@@ -21,12 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   links (tested on synthetic images).
 - Running out of memory while reading a very large Master File Table is reported as an
   error instead of ending the program.
-- A symbolic link that points to a folder is accepted as a scan target and scanned as
-  that folder, also when it was created as a link to a file.
+- A link to a folder is scanned as the folder it points to. This now also holds for a
+  link that was created as a file-type link (not yet run on a machine that can create
+  such links).
 - Device paths such as `\\.\C:` are refused with the message "Device paths are not
   supported" instead of an unclear read error.
-- The check for online-only cloud folders covers the whole path of the scan target,
-  including folders behind links, not only the chosen folder itself.
+- The check for online-only cloud folders now looks at every folder on the path of the
+  scan target, not only at the chosen folder.
 
 ## [0.1.0] - 2026-11-22
 

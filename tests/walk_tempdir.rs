@@ -52,14 +52,20 @@ fn tree_with_junction() {
 
 /// Runs `mklink` with `kind` (`/J`, `/D` or none for a file symbolic link).
 /// Returns false if Windows refused it (symbolic links need a privilege
-/// that an unelevated shell has only with Developer Mode on).
+/// that an unelevated shell has only with Developer Mode on). With the
+/// environment variable `CI` set, a refused link fails the test instead, so
+/// the test cannot pass there without asserting anything.
 fn mklink(kind: Option<&str>, link: &Path, target: &Path) -> bool {
     let mut cmd = Command::new("cmd");
     cmd.args(["/c", "mklink"]);
     if let Some(kind) = kind {
         cmd.arg(kind);
     }
-    cmd.arg(link).arg(target).output().expect("run mklink").status.success()
+    let out = cmd.arg(link).arg(target).output().expect("run mklink");
+    if !out.status.success() && std::env::var_os("CI").is_some() {
+        panic!("mklink {kind:?} failed in CI: {out:?}");
+    }
+    out.status.success()
 }
 
 /// A folder `target` with one file and a subfolder, inside `tmp`.

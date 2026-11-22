@@ -1,8 +1,10 @@
 //! Fallback scanner: walks directories in parallel with ordinary Win32 calls.
 //!
 //! Used without admin rights, on non-NTFS volumes, on network paths and for
-//! single folders. Directories are opened for listing only; files are never
-//! opened. The walk uses an explicit work queue, never recursion: worker
+//! single folders. Directories are opened for listing only; file contents are
+//! never opened. To resolve where the scan target points if it is a link (or
+//! lies behind one), one handle with attribute access only is opened on it
+//! before the walk starts. The walk uses an explicit work queue, never recursion: worker
 //! threads list directories, the calling thread alone fills the tree and
 //! hands out new directories as jobs.
 use std::io;
@@ -489,10 +491,19 @@ fn levels(path: &[u16]) -> Vec<Vec<u16>> {
     out
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum LevelCheck {
+    Refuse,
+    Proceed,
+    /// The check ended at a link (only with `stop_at_link`): what lies behind
+    /// it has not been checked yet.
+    ReachedLink,
+}
+
 /// Checks the levels of `path` from the top down for online-only folders.
-/// With `stop_at_link`, the check ends after the first link (a junction or
-/// symbolic link), because the levels below it lie elsewhere.
-fn check_levels(path: &[u16], stop_at_link: bool) -> RootAccess {
+/// With `stop_at_link`, the check ends after the first link (a junction,
+/// symbolic link or mount point), because the levels behind it lie elsewhere.
+fn check_levels(path: &[u16], stop_at_link: bool) -> LevelCheck {
     let mut past_link = false;
     let levels = levels(path).into_iter().map_while(|level| {
         if past_link {
@@ -502,7 +513,21 @@ fn check_levels(path: &[u16], stop_at_link: bool) -> RootAccess {
         past_link = stop_at_link && entry.is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
         Some(entry.map(|(attributes, _)| attributes))
     });
-    path_access(levels)
+    match path_access(levels) {
+        RootAccess::Refuse => LevelCheck::Refuse,
+        RootAccess::Proceed if past_link => LevelCheck::ReachedLink,
+        RootAccess::Proceed => LevelCheck::Proceed,
+    }
+}
+
+/// The path that is listed and whether it still needs a check of every
+/// level, from the outcome of the first check of the path as given and the
+/// result of resolving it. Whenever the first check ended at a link, the
+/// listed path (the resolved one, or the given one if resolution failed) is
+/// checked in full, also when resolution returned the same path.
+fn plan_root(given: Vec<u16>, first: LevelCheck, resolved: Option<Vec<u16>>) -> (Vec<u16>, bool) {
+    let listed = resolved.unwrap_or(given);
+    (listed, first == LevelCheck::ReachedLink)
 }
 
 /// The final path of `path` (verbatim, no NUL) with links resolved, in the
@@ -620,19 +645,16 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     // an online-only item can already make the provider fetch it. Links on
     // the way are checked themselves; what lies behind them is checked once
     // they are resolved.
-    if check_levels(&given, true) == RootAccess::Refuse {
+    let first = check_levels(&given, true);
+    if first == LevelCheck::Refuse {
         return Err(ScanError::OnlineOnly);
     }
     ensure_directory(&given, true).map_err(scan_error)?;
-    let root_path = match final_path(&given) {
-        Some(resolved) if resolved != given => {
-            if check_levels(&resolved, false) == RootAccess::Refuse {
-                return Err(ScanError::OnlineOnly);
-            }
-            resolved
-        }
-        _ => given,
-    };
+    let resolved = final_path(&given);
+    let (root_path, check_fully) = plan_root(given, first, resolved);
+    if check_fully && check_levels(&root_path, false) == LevelCheck::Refuse {
+        return Err(ScanError::OnlineOnly);
+    }
     ensure_directory(&root_path, false).map_err(scan_error)?;
     let root_name = root_name(root).map_err(scan_error)?;
 
@@ -775,6 +797,22 @@ mod tests {
     }
 
     #[test]
+    fn listed_path_is_checked_in_full_after_a_link() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        let given = w(r"\\?\C:\mnt\a");
+        let other = w(r"\\?\D:\a");
+        // The first check covered every level: no second check.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(other.clone())), (other.clone(), false));
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, None), (given.clone(), false));
+        // It ended at a link and resolution failed: the given path in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::ReachedLink, None), (given.clone(), true));
+        // It ended at a link and resolution returned the same path: that path in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::ReachedLink, Some(given.clone())), (given.clone(), true));
+        // It ended at a link and resolution returned another path: the resolved one in full.
+        assert_eq!(plan_root(given, LevelCheck::ReachedLink, Some(other.clone())), (other, true));
+    }
+
+    #[test]
     fn levels_below_the_drive_or_share_root() {
         let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
         let ws = |v: &[&str]| v.iter().map(|s| w(s)).collect::<Vec<_>>();
@@ -810,19 +848,37 @@ mod tests {
         let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
         let same = |a: &[u16], b: &str| String::from_utf16_lossy(a).eq_ignore_ascii_case(b);
         let resolve = |p: &str| final_path(&verbatim_path(Path::new(p)).unwrap());
-        // A junction and a directory symbolic link.
-        for (link, target) in [(r"C:\Documents and Settings", r"\\?\C:\Users"), (r"C:\Users\All Users", r"\\?\C:\ProgramData")] {
-            let resolved = resolve(link).unwrap_or_else(|| panic!("{link} not resolved"));
-            assert!(same(&resolved, target), "{link} -> {}", String::from_utf16_lossy(&resolved));
-            assert_eq!(check_levels(&resolved, false), RootAccess::Proceed);
-            assert_eq!(check_levels(&verbatim_path(Path::new(link)).unwrap(), true), RootAccess::Proceed);
+        match std::env::var("SystemDrive") {
+            Ok(drive) => {
+                // A junction and a directory symbolic link.
+                let links = [
+                    (format!(r"{drive}\Documents and Settings"), format!(r"\\?\{drive}\Users")),
+                    (format!(r"{drive}\Users\All Users"), format!(r"\\?\{drive}\ProgramData")),
+                ];
+                for (link, target) in &links {
+                    let given = verbatim_path(Path::new(link)).unwrap();
+                    let is_link = entry_attributes(&given).is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
+                    if !is_link {
+                        eprintln!("skipped {link}: not a link on this system");
+                        continue;
+                    }
+                    let resolved = resolve(link).unwrap_or_else(|| panic!("{link} not resolved"));
+                    assert!(same(&resolved, target), "{link} -> {}", String::from_utf16_lossy(&resolved));
+                    assert_eq!(check_levels(&resolved, false), LevelCheck::Proceed);
+                    assert_eq!(check_levels(&given, true), LevelCheck::ReachedLink);
+                }
+            }
+            Err(_) => eprintln!("skipped the system links: SystemDrive is not set"),
         }
         // A folder that is no link resolves to itself, with long names.
         let tmp = tempfile::tempdir().unwrap();
         let plain = final_path(&verbatim_path(tmp.path()).unwrap()).expect("folder resolved");
         assert_eq!(final_path(&plain), Some(plain.clone()));
         // A drive root keeps its backslash.
-        assert_eq!(final_path(&w(r"\\?\C:\")), Some(w(r"\\?\C:\")));
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let root = w(&format!(r"\\?\{drive}\"));
+        let resolved_root = final_path(&root).expect("drive root resolved");
+        assert!(same(&resolved_root, &format!(r"\\?\{drive}\")));
         assert_eq!(final_path(&verbatim_path(&tmp.path().join("missing")).unwrap()), None);
     }
 

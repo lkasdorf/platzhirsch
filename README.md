@@ -128,8 +128,10 @@ The design document and the implementation plan are in
   and the space folders need for their own index is not counted. This is why the
   allocated total of a drive is slightly below its used space.
 - A cloud folder that is not on this machine is refused as a scan target. The check
-  looks at every folder on the path to the chosen folder, also behind links. It stops at
-  the first folder whose parent cannot be listed.
+  looks at every folder on the path to the chosen folder. It stops at the first folder
+  whose parent cannot be listed. When the path goes through a link, Windows resolves the
+  link before the folders behind it can be checked, so a link that points into an
+  online-only folder can still make the provider fetch that folder's entry.
 - The drive list is read once when the program starts. A drive plugged in later appears
   after a restart.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
