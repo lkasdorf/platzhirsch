@@ -24,6 +24,9 @@ use crate::model::{F_DIR, F_LINK, NO_PARENT, NodeId, TreeBuilder};
 /// Read-only access to a volume. There is deliberately no way to write.
 pub trait VolumeReader: Send {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
+
+    /// Tells the reader the sector size once the boot sector is parsed.
+    fn set_sector_size(&mut self, _bytes: u32) {}
 }
 
 /// Where the MFT lives on the volume.
@@ -187,6 +190,10 @@ fn locate_map<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<Located, 
     let sector = u64::from(boot.bytes_per_sector);
 
     let start = boot.mft_lcn.checked_mul(cluster).ok_or(malformed("MFT LCN out of range"))?;
+    let volume_bytes = boot.total_sectors.checked_mul(sector).ok_or(malformed("volume size out of range"))?;
+    if start >= volume_bytes {
+        return Err(malformed("MFT starts outside the volume"));
+    }
     let mut rec = vec![0u8; boot.record_size as usize];
     read_aligned(r, start, &mut rec, sector)?;
     apply_fixups(&mut rec, FIXUP_BLOCK_SIZE).map_err(ScanError::Ntfs)?;
@@ -442,6 +449,7 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
         Err(NtfsError::BadSignature) => return Err(ScanError::NotNtfs),
         Err(e) => return Err(ScanError::Ntfs(e)),
     };
+    r.set_sector_size(boot.bytes_per_sector);
     let Located { map, byte_len, ext_records } = locate_map(r, &boot)?;
     let record_count = byte_len / u64::from(boot.record_size);
     if record_count >= u64::from(NO_RECORD) {
@@ -549,12 +557,16 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
 
 /// Scans the NTFS volume `drive` (e.g. `'c'`) through its MFT. Needs admin rights.
 pub fn scan_mft(drive: char, progress: &Progress) -> Result<ScanResult, ScanError> {
+    // The duration includes opening the volume.
+    let started = Instant::now();
     let mut volume = crate::win::RawVolume::open(drive).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => ScanError::AccessDenied,
         _ => ScanError::Io(e),
     })?;
     let root_name = format!("{}:", drive.to_ascii_uppercase());
-    scan_mft_from(&mut volume, &root_name, progress)
+    let mut result = scan_mft_from(&mut volume, &root_name, progress)?;
+    result.duration = started.elapsed();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -811,6 +823,22 @@ mod tests {
                 "byte {offset:#x} = {value:#x}"
             );
         }
+    }
+
+    #[test]
+    fn mft_start_outside_the_volume_is_malformed() {
+        // The MFT starts at byte 16384 = sector 32; a volume of 32 sectors ends right there.
+        for total_sectors in [32u64, 1, 0, u64::MAX] {
+            let mut v = image();
+            v.bytes[0x28..0x30].copy_from_slice(&total_sectors.to_le_bytes());
+            assert!(
+                matches!(scan_mft_from(&mut v, "C:", &Progress::default()), Err(ScanError::Ntfs(NtfsError::Malformed(_)))),
+                "{total_sectors} sectors"
+            );
+        }
+        let mut v = image();
+        v.bytes[0x28..0x30].copy_from_slice(&33u64.to_le_bytes());
+        assert!(scan_mft_from(&mut v, "C:", &Progress::default()).is_ok());
     }
 
     #[test]

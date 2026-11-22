@@ -16,10 +16,12 @@ pub enum ScanTarget {
 }
 
 impl ScanTarget {
-    /// A drive root (`C:`, `C:\`, `c:/`) becomes the whole volume, any
-    /// other path a folder.
+    /// A drive root (`C:`, `C:\`, `c:/`, also in the verbatim form `\\?\C:\`)
+    /// becomes the whole volume, any other path a folder.
     pub fn from_path(path: std::path::PathBuf) -> ScanTarget {
         if let Some(s) = path.to_str() {
+            // `\\?\UNC\server\share` has no drive letter after the prefix and stays a folder.
+            let s = s.strip_prefix(r"\\?\").unwrap_or(s);
             let mut chars = s.strip_suffix(['\\', '/']).unwrap_or(s).chars();
             if let (Some(letter), Some(':'), None) = (chars.next(), chars.next(), chars.next())
                 && letter.is_ascii_alphabetic()
@@ -160,7 +162,19 @@ mod tests {
             assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
         }
         assert!(matches!(target(r"c:\"), ScanTarget::Volume('C')));
-        for folder in [r"C:\DRIVE", r"C:\\", r"\\nas\share", r"\\?\C:\", "1:", "src"] {
+        for root in [r"\\?\C:\", r"\\?\c:", r"\\?\D:/"] {
+            assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
+        }
+        for folder in [
+            r"C:\DRIVE",
+            r"C:\\",
+            r"\\nas\share",
+            r"\\?\C:\DRIVE",
+            r"\\?\UNC\server\share",
+            r"\\?\\C:\",
+            "1:",
+            "src",
+        ] {
             assert!(matches!(target(folder), ScanTarget::Folder(ref p) if p.as_os_str() == folder), "{folder}");
         }
     }

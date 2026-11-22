@@ -1,13 +1,15 @@
 //! Windows bindings: volumes, elevation, time, memory and a read-only raw volume.
+use std::ffi::OsString;
 use std::fs::File;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
 use std::os::windows::process::CommandExt;
 
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, SYSTEMTIME};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, MAX_PATH, SYSTEMTIME};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
-    GetVolumeInformationW,
+    GetLongPathNameW, GetVolumeInformationW,
 };
 use windows::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode, THREAD_ERROR_MODE};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -25,7 +27,6 @@ pub struct VolumeInfo {
     pub fs_name: String,
     pub total: u64,
     pub free: u64,
-    pub removable: bool,
 }
 
 /// Closes a kernel handle when dropped.
@@ -82,22 +83,42 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
 pub fn volume_info(letter: char) -> Option<VolumeInfo> {
     let root = drive_root(letter)?;
     let _guard = NoErrorDialog::new();
-    let mut fs_buf = [0u16; 64];
+    let mut fs_buf = [0u16; MAX_PATH as usize + 1];
     // SAFETY: `root` is NUL-terminated and `fs_buf` is a writable buffer whose length the binding passes.
     unsafe { GetVolumeInformationW(&root, None, None, None, None, Some(&mut fs_buf)) }.ok()?;
     let fs_len = fs_buf.iter().position(|&c| c == 0).unwrap_or(fs_buf.len());
     let (mut total, mut free) = (0u64, 0u64);
     // SAFETY: `root` is NUL-terminated; both out pointers point to live `u64`s.
     unsafe { GetDiskFreeSpaceExW(&root, None, Some(&mut total), Some(&mut free)) }.ok()?;
-    // SAFETY: `root` is a valid, NUL-terminated wide string.
-    let kind = unsafe { GetDriveTypeW(&root) };
     Some(VolumeInfo {
         letter: letter.to_ascii_uppercase(),
         fs_name: String::from_utf16_lossy(&fs_buf[..fs_len]),
         total,
         free,
-        removable: kind == DRIVE_REMOVABLE,
     })
+}
+
+/// The long form of `path` (8.3 short names expanded, letter case as stored).
+/// The path must exist; the file's contents are not opened.
+pub fn long_path_name(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Path contains a NUL character"));
+    }
+    wide.push(0);
+    let mut buf = vec![0u16; MAX_PATH as usize + 1];
+    loop {
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `buf` is writable and the binding passes its length.
+        let n = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        if n == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if n < buf.len() {
+            return Ok(OsString::from_wide(&buf[..n]).into());
+        }
+        // Too small: `n` is the required size including the terminating NUL.
+        buf.resize(n, 0);
+    }
 }
 
 /// True if this process runs with an elevated (admin) token.
@@ -206,6 +227,13 @@ pub fn memory_mb() -> (u64, u64) {
 /// writing and deleting on it.
 pub struct RawVolume {
     file: File,
+    sector_size: usize,
+}
+
+/// Where to continue after `done` bytes of a read were delivered: the last
+/// sector boundary that was reached completely.
+fn resume_point(done: usize, sector: usize) -> usize {
+    if sector == 0 { done } else { done / sector * sector }
 }
 
 impl RawVolume {
@@ -219,12 +247,17 @@ impl RawVolume {
             .read(true)
             .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
             .open(path)?;
-        Ok(RawVolume { file })
+        Ok(RawVolume { file, sector_size: 512 })
     }
 }
 
 impl VolumeReader for RawVolume {
+    fn set_sector_size(&mut self, bytes: u32) {
+        self.sector_size = bytes as usize;
+    }
+
     /// `offset` and `buf.len()` are sector-aligned (the scanner guarantees it).
+    /// After a short read the next read starts on a sector boundary again.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
         let mut pos = 0usize;
         while pos < buf.len() {
@@ -238,7 +271,18 @@ impl VolumeReader for RawVolume {
                         "Read past the end of the volume",
                     ));
                 }
-                Ok(n) => pos += n,
+                Ok(n) => {
+                    let done = pos + n;
+                    let next = if done >= buf.len() { done } else { resume_point(done, self.sector_size) };
+                    if next <= pos {
+                        // Less than one sector arrived; reading on would never end.
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "The volume returned less than one sector",
+                        ));
+                    }
+                    pos = next;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
@@ -254,5 +298,22 @@ mod tests {
     #[test]
     fn system_drive_is_listed_as_ntfs() {
         assert!(list_volumes().iter().any(|v| v.letter == 'C' && v.fs_name == "NTFS" && v.total > v.free));
+    }
+
+    #[test]
+    fn resume_point_stays_on_a_sector_boundary() {
+        assert_eq!(resume_point(1000, 512), 512);
+        assert_eq!(resume_point(1024, 512), 1024);
+        assert_eq!(resume_point(0, 4096), 0);
+        assert_eq!(resume_point(300, 0), 300);
+    }
+
+    #[test]
+    fn long_path_name_of_a_temp_folder() {
+        let tmp = tempfile::Builder::new().prefix("Platzhirsch Long Folder Name ").tempdir().unwrap();
+        let name = tmp.path().file_name().unwrap().to_owned();
+        let long = long_path_name(tmp.path()).unwrap();
+        assert_eq!(long.file_name().unwrap(), name);
+        assert!(long_path_name(&tmp.path().join("does not exist")).is_err());
     }
 }

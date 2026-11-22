@@ -195,7 +195,6 @@ mod tests {
             fs_name: "NTFS".into(),
             total: 4_090_260_848_640,
             free: 1_407_374_883_553,
-            removable: false,
         };
         let s = status_text(&result, Some(&volume));
         assert_eq!(s, "Free: 1.3 TB of 3.7 TB | 1,683,667 files | MFT scan, 4.2 s | 3 skipped");

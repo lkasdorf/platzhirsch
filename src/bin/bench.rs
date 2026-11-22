@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use platzhirsch::model::{SortKey, Tree};
 use platzhirsch::scan::mft::scan_mft;
 use platzhirsch::scan::walk::scan_walk;
-use platzhirsch::scan::{Progress, ScanResult};
-use platzhirsch::win::{memory_mb, volume_info};
+use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget};
+use platzhirsch::win::{long_path_name, memory_mb, volume_info};
 
 const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]";
 const TOP_CHILDREN: usize = 15;
@@ -26,10 +26,12 @@ fn drive_letter(s: &str) -> Option<char> {
     (chars.as_str() == ":").then_some(letter)
 }
 
-/// The drive letter if `path` is a drive root (`X:\` or `X:`).
+/// The drive letter if `path` is a drive root (`X:\`, `X:` or `\\?\X:\`).
 fn drive_root_of(path: &Path) -> Option<char> {
-    let s = path.to_str()?;
-    drive_letter(s.strip_suffix(['\\', '/']).unwrap_or(s))
+    match ScanTarget::from_path(path.to_path_buf()) {
+        ScanTarget::Volume(letter) => Some(letter),
+        ScanTarget::Folder(_) => None,
+    }
 }
 
 fn parse_args(args: &[String]) -> Option<(Command, Option<String>)> {
@@ -59,7 +61,8 @@ fn emit(lines: &[String], out: Option<&str>) {
     if let Some(path) = out
         && let Err(e) = std::fs::write(path, &text)
     {
-        eprintln!("could not write {path}: {e}");
+        eprintln!("error: could not write {path}: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -90,14 +93,18 @@ fn report(method: &str, result: &ScanResult, volume: Option<char>, walk_counts: 
         lines.push(format!("online_only: {}", result.online_only));
     }
     if let Some(letter) = volume {
-        let volume_used = volume_info(letter).map_or(0, |v| v.total.saturating_sub(v.free));
-        let deviation = if volume_used == 0 {
-            0.0
-        } else {
-            (allocated as f64 - volume_used as f64) / volume_used as f64 * 100.0
-        };
-        lines.push(format!("volume_used: {volume_used}"));
-        lines.push(format!("deviation_percent: {deviation:.2}"));
+        // Without volume information there is nothing to compare with: say so.
+        match volume_info(letter).map(|v| v.total.saturating_sub(v.free)).filter(|&used| used > 0) {
+            Some(used) => {
+                let deviation = (allocated as f64 - used as f64) / used as f64 * 100.0;
+                lines.push(format!("volume_used: {used}"));
+                lines.push(format!("deviation_percent: {deviation:.2}"));
+            }
+            None => {
+                lines.push("volume_used: n/a".to_string());
+                lines.push("deviation_percent: n/a".to_string());
+            }
+        }
     }
     lines.push(format!("memory_after_scan_mb: {mem_now}"));
     lines.push(format!("memory_peak_mb: {mem_peak}"));
@@ -129,7 +136,18 @@ fn split_drive_path(folder: &Path) -> Option<(char, Vec<String>)> {
     Some((letter, names))
 }
 
+/// The absolute path of `folder` with 8.3 short names expanded, so that its
+/// names match the ones in the MFT tree.
+fn resolve_folder(folder: &Path) -> std::io::Result<PathBuf> {
+    long_path_name(&std::path::absolute(folder)?)
+}
+
 fn compare(folder: &Path, out: Option<&str>) {
+    let folder = match resolve_folder(folder) {
+        Ok(f) => f,
+        Err(e) => fail(format!("cannot resolve {}: {}", folder.display(), ScanError::Io(e)), out),
+    };
+    let folder = folder.as_path();
     let Some((letter, names)) = split_drive_path(folder) else {
         fail("not a local drive path".to_string(), out);
     };
@@ -176,5 +194,20 @@ fn main() {
             emit(&report("Walk", &result, drive_root_of(&path), true), out);
         }
         Command::Compare(folder) => compare(&folder, out),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_roots_in_every_form() {
+        for root in [r"C:\", "C:", "c:/", r"\\?\C:\", r"\\?\c:"] {
+            assert_eq!(drive_root_of(Path::new(root)), Some('C'), "{root}");
+        }
+        for folder in [r"C:\Users", r"\\?\C:\Users", r"\\?\UNC\server\share", r"\\nas\share"] {
+            assert_eq!(drive_root_of(Path::new(folder)), None, "{folder}");
+        }
     }
 }
