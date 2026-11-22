@@ -18,11 +18,20 @@ pub enum AttrListLoc {
 pub struct RecordInfo {
     pub in_use: bool,
     pub is_dir: bool,
+    /// Record number (48 bits) of the base record; meaningful only if
+    /// `is_extension`.
     pub base_record: u64,
+    /// The base reference at `0x20` is non-zero. A base record has an all-zero
+    /// reference; an extension record of `$MFT` refers to record 0 with a
+    /// non-zero sequence number, so the record number alone cannot tell.
+    pub is_extension: bool,
     pub name: Option<NameInfo>,
     pub mtime: i64,
     pub size: Option<u64>,
     pub allocated: u64,
+    /// Initialized size (`0x38`) of the first extent of the unnamed
+    /// non-resident `$DATA`; `None` if this record holds no such extent.
+    pub initialized: Option<u64>,
     pub is_link: bool,
     pub data_runs: Vec<(u64, Vec<Run>)>,
     pub attr_list: Option<AttrListLoc>,
@@ -49,6 +58,13 @@ const ATTR_FLAG_COMPRESSED: u16 = 0x0001;
 const ATTR_FLAG_SPARSE: u16 = 0x8000;
 const NAMESPACE_DOS: u8 = 2;
 const REPARSE_NAME_SURROGATE: u32 = 0x2000_0000;
+/// `FILE_ATTRIBUTE_REPARSE_POINT` in the file attributes of `$FILE_NAME`.
+const FILE_ATTR_REPARSE_POINT: u32 = 0x0400;
+/// In the `$FILE_NAME` value: file attributes, and the packed EA size or the
+/// reparse tag (ntfs3 `ATTR_FILE_NAME.dup.fa` / `.dup.extend_data`, ntfs-3g
+/// `FILE_NAME_ATTR.file_attributes` / `.reparse_point_tag`).
+const FILE_NAME_ATTRS_OFF: usize = 0x38;
+const FILE_NAME_REPARSE_TAG_OFF: usize = 0x3C;
 /// `$BadClus`: its named `$Bad` stream spans the whole volume.
 const BAD_CLUS: u64 = 8;
 const MFT_REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
@@ -190,16 +206,19 @@ pub fn parse_record(record: &[u8], record_no: u64, want_runs: bool) -> Result<Re
     let attr_off = usize::from(u16_at(record, 0x14)?);
     let flags = u16_at(record, 0x16)?;
     let used = usize::try_from(u32_at(record, 0x18)?).map_err(|_| NtfsError::Malformed("used size"))?;
-    let base_record = u64_at(record, 0x20)? & MFT_REF_MASK;
+    let base_ref = u64_at(record, 0x20)?;
+    let base_record = base_ref & MFT_REF_MASK;
 
     let mut info = RecordInfo {
         in_use: flags & RECORD_IN_USE != 0,
         is_dir: flags & RECORD_DIR != 0,
         base_record,
+        is_extension: base_ref != 0,
         name: None,
         mtime: 0,
         size: None,
         allocated: 0,
+        initialized: None,
         is_link: false,
         data_runs: Vec::new(),
         attr_list: None,
@@ -213,8 +232,9 @@ pub fn parse_record(record: &[u8], record_no: u64, want_runs: bool) -> Result<Re
     if attr_off < RECORD_HEADER_LEN || attr_off > used {
         return Err(NtfsError::Malformed("first attribute offset out of range"));
     }
-    let skip_named_data = record_no == BAD_CLUS || base_record == BAD_CLUS;
+    let skip_named_data = record_no == BAD_CLUS || (info.is_extension && base_record == BAD_CLUS);
     let area = &record[..used];
+    let mut attrs = Attrs::default();
 
     let mut pos = attr_off;
     loop {
@@ -228,15 +248,31 @@ pub fn parse_record(record: &[u8], record_no: u64, want_runs: bool) -> Result<Re
             return Err(NtfsError::Malformed("attribute length too small"));
         }
         let attr = slice(area, pos, len, "attribute exceeds used size")?;
-        parse_attribute(attr, &mut info, skip_named_data, want_runs)?;
+        parse_attribute(attr, &mut info, &mut attrs, skip_named_data, want_runs)?;
         pos += len; // len >= 16, so the loop always advances
     }
+    // A non-resident $REPARSE_POINT is not read; the tag is taken from the
+    // copy in $FILE_NAME instead.
+    if attrs.nonresident_reparse
+        && let Some(tag) = attrs.file_name_reparse_tag
+    {
+        info.is_link = tag & REPARSE_NAME_SURROGATE != 0;
+    }
     Ok(info)
+}
+
+/// What [`parse_record`] needs to remember across the attributes of one record.
+#[derive(Default)]
+struct Attrs {
+    nonresident_reparse: bool,
+    /// Reparse tag of the first `$FILE_NAME` marked as a reparse point.
+    file_name_reparse_tag: Option<u32>,
 }
 
 fn parse_attribute(
     attr: &[u8],
     info: &mut RecordInfo,
+    attrs: &mut Attrs,
     skip_named_data: bool,
     want_runs: bool,
 ) -> Result<(), NtfsError> {
@@ -267,7 +303,11 @@ fn parse_attribute(
                 }
                 if start_vcn == 0 {
                     let counted = if flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_SPARSE) != 0 {
-                        if attr.len() < NONRESIDENT_EXT_HEADER_LEN {
+                        // The total allocated size at 0x40 makes the header
+                        // 0x48 bytes; a run list starting earlier overlaps it.
+                        // Only the first extent has this field (ntfs3
+                        // `ni_insert_nonresident`: `is_ext` needs `!svcn`).
+                        if run_off < NONRESIDENT_EXT_HEADER_LEN {
                             return Err(NtfsError::Malformed("compressed/sparse header too short"));
                         }
                         u64_at(attr, 0x40)?
@@ -277,6 +317,7 @@ fn parse_attribute(
                     info.allocated = info.allocated.saturating_add(counted);
                     if !named {
                         info.size = Some(data_size);
+                        info.initialized = Some(u64_at(attr, 0x38)?);
                     }
                 }
                 if !named && want_runs {
@@ -287,8 +328,9 @@ fn parse_attribute(
                 let runs = super::runs::decode_runs(run_bytes)?;
                 info.attr_list = Some(AttrListLoc::NonResident { runs, len: data_size });
             }
-            // $STANDARD_INFORMATION, $FILE_NAME and $REPARSE_POINT headers
-            // we need are resident; a non-resident one is not read.
+            ATTR_REPARSE => attrs.nonresident_reparse = true,
+            // $STANDARD_INFORMATION and $FILE_NAME are always resident; a
+            // non-resident one is not read.
             _ => {}
         }
         return Ok(());
@@ -311,6 +353,11 @@ fn parse_attribute(
             let chars = usize::from(value[0x40]);
             let namespace = value[0x41];
             let name = slice(value, FILE_NAME_LEN, 2 * chars, "file name outside $FILE_NAME")?;
+            if attrs.file_name_reparse_tag.is_none()
+                && u32_at(value, FILE_NAME_ATTRS_OFF)? & FILE_ATTR_REPARSE_POINT != 0
+            {
+                attrs.file_name_reparse_tag = Some(u32_at(value, FILE_NAME_REPARSE_TAG_OFF)?);
+            }
             if info.name.is_none() && namespace != NAMESPACE_DOS {
                 info.name = Some(NameInfo {
                     parent: u64_at(value, 0x00)? & MFT_REF_MASK,
@@ -459,6 +506,7 @@ mod tests {
         assert!(!info.is_dir);
         assert!(!info.is_link);
         assert_eq!(info.base_record, 0);
+        assert!(!info.is_extension);
         assert_eq!(info.attr_list, None);
         assert!(info.data_runs.is_empty());
     }
@@ -512,9 +560,83 @@ mod tests {
     #[test]
     fn extension_record() {
         let info = parse(RecordBuilder::new(1024).base(27).data_nonresident("", 0, RUNS, 1_003_520, 1_000_000, 0, 0));
+        assert!(info.is_extension);
         assert_eq!(info.base_record, 27);
         assert_eq!(info.size, Some(1_000_000));
         assert_eq!(info.allocated, 1_003_520);
+    }
+
+    #[test]
+    fn extension_record_of_mft() {
+        // base reference: record 0 with a non-zero sequence number
+        let info = parse(RecordBuilder::new(1024).base(0).data_nonresident("", 4, RUNS, 0, 0, 0, 0));
+        assert!(info.is_extension);
+        assert_eq!(info.base_record, 0);
+    }
+
+    #[test]
+    fn initialized_size_of_unnamed_data() {
+        let info = parse(RecordBuilder::new(1024).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).initialized(4096));
+        assert_eq!(info.size, Some(5000));
+        assert_eq!(info.allocated, 8192);
+        assert_eq!(info.initialized, Some(4096));
+        // a named stream, a later extent and resident data leave it unset
+        let info = parse(
+            RecordBuilder::new(1024)
+                .data_resident("", 10)
+                .data_nonresident("named", 0, RUNS, 8192, 5000, 0, 0)
+                .data_nonresident("", 16, RUNS, 8192, 5000, 0, 0),
+        );
+        assert_eq!(info.initialized, None);
+    }
+
+    #[test]
+    fn compressed_or_sparse_needs_long_header() {
+        for flags in [0x0001u16, 0x8000] {
+            let good = record(RecordBuilder::new(1024).data_nonresident("", 0, RUNS, 8192, 5000, flags, 4096));
+            assert!(parse_record(&good, 30, false).is_ok());
+            // move the run list to 0x40, where the total allocated size belongs
+            let at = first_attr(&good) + 0x20;
+            let mut r = good.clone();
+            r[at..at + 2].copy_from_slice(&0x40u16.to_le_bytes());
+            assert!(matches!(parse_record(&r, 30, false), Err(NtfsError::Malformed(_))), "flags {flags:#x}");
+        }
+        // a later extent has no total allocated size, so the short header is fine
+        let mut r = record(RecordBuilder::new(1024).data_nonresident("", 16, RUNS, 8192, 5000, 0x8000, 4096));
+        let at = first_attr(&r) + 0x20;
+        r[at..at + 2].copy_from_slice(&0x40u16.to_le_bytes());
+        assert!(parse_record(&r, 30, false).is_ok());
+    }
+
+    #[test]
+    fn named_resident_stream_leaves_size_alone() {
+        let info = parse(RecordBuilder::new(1024).data_resident("", 10).data_resident("Zone.Identifier", 500));
+        assert_eq!(info.size, Some(10));
+        assert_eq!(info.allocated, 0);
+        let info = parse(RecordBuilder::new(1024).data_resident("Zone.Identifier", 500));
+        assert_eq!(info.size, None);
+    }
+
+    #[test]
+    fn compressed_later_extent_adds_nothing() {
+        let info = parse(RecordBuilder::new(1024).data_nonresident("", 16, RUNS, 65536, 60000, 0x0001, 16384));
+        assert_eq!(info.size, None);
+        assert_eq!(info.allocated, 0);
+    }
+
+    #[test]
+    fn nonresident_reparse_uses_file_name_tag() {
+        let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000));
+        assert!(info.is_link);
+        // not a name surrogate
+        let info = parse(RecordBuilder::new(1024).file_name_reparse(5, "d", 1, 0x9000_001A).reparse_nonresident(RUNS, 5000));
+        assert!(!info.is_link);
+        // $FILE_NAME not marked as a reparse point: the tag field is no tag
+        let info = parse(RecordBuilder::new(1024).file_name(5, "x", 1).reparse_nonresident(RUNS, 5000));
+        assert!(!info.is_link);
+        // without a $REPARSE_POINT the $FILE_NAME copy (possibly stale) is not used
+        let info = parse(RecordBuilder::new(1024).file_name_reparse(5, "s", 1, 0xA000_0003));
+        assert!(!info.is_link);
     }
 
     #[test]

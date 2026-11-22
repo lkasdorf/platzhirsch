@@ -22,7 +22,8 @@ pub struct RecordBuilder {
     record_size: usize,
     in_use: bool,
     dir: bool,
-    base: u64,
+    /// Base record of an extension record; `None` for a base record.
+    base: Option<u64>,
     /// (attribute type, complete attribute bytes)
     attrs: Vec<(u32, Vec<u8>)>,
 }
@@ -69,9 +70,72 @@ fn resident_attr(attr_type: u32, name: &[u16], value: &[u8], res_flags: u8) -> V
     a
 }
 
+/// A non-resident attribute: 0x40-byte header (0x48 if compressed or
+/// sparse), name, run list.
+#[allow(clippy::too_many_arguments)]
+fn nonresident_attr(
+    attr_type: u32,
+    stream: &str,
+    start_vcn: u64,
+    runs: &[u8],
+    allocated: u64,
+    real: u64,
+    flags: u16,
+    total_allocated: u64,
+) -> Vec<u8> {
+    let name: Vec<u16> = stream.encode_utf16().collect();
+    // Compressed or sparse attributes carry the extra total_size field,
+    // making the header 0x48 instead of 0x40 bytes (ntfs3 SIZEOF_NONRESIDENT_EX).
+    let extended = flags & (0x0001 | 0x8000) != 0;
+    let name_off = if extended { 0x48 } else { 0x40 };
+    let run_off = align8(name_off + 2 * name.len());
+    let len = align8(run_off + runs.len() + 1); // + terminator byte
+    let clusters: u64 = decode_runs(runs)
+        .map(|r| r.iter().map(|x| x.clusters).sum())
+        .unwrap_or(0);
+    let mut a = vec![0u8; len];
+    put_u32(&mut a, 0x00, attr_type);
+    put_u32(&mut a, 0x04, len as u32);
+    a[0x08] = 1; // non-resident
+    a[0x09] = name.len() as u8;
+    put_u16(&mut a, 0x0A, name_off as u16);
+    put_u16(&mut a, 0x0C, flags);
+    put_u64(&mut a, 0x10, start_vcn);
+    put_u64(&mut a, 0x18, (start_vcn + clusters).saturating_sub(1));
+    put_u16(&mut a, 0x20, run_off as u16);
+    a[0x22] = if flags & 0x0001 != 0 { 4 } else { 0 }; // compression unit
+    put_u64(&mut a, 0x28, allocated);
+    put_u64(&mut a, 0x30, real);
+    put_u64(&mut a, 0x38, real); // initialized size
+    if extended {
+        put_u64(&mut a, 0x40, total_allocated);
+    }
+    put_name(&mut a, name_off, &name);
+    a[run_off..run_off + runs.len()].copy_from_slice(runs);
+    a
+}
+
+/// The bytes of an `$ATTRIBUTE_LIST` value. Entries are (attribute type,
+/// start VCN, record number); each takes 0x20 bytes.
+pub fn attr_list_bytes(entries: &[(u32, u64, u64)]) -> Vec<u8> {
+    let entry_len = 0x20; // 0x1A rounded up to 8
+    let mut v = vec![0u8; entry_len * entries.len()];
+    for (i, &(attr_type, vcn, record_no)) in entries.iter().enumerate() {
+        let e = i * entry_len;
+        put_u32(&mut v, e, attr_type);
+        put_u16(&mut v, e + 0x04, entry_len as u16);
+        v[e + 0x06] = 0; // name length
+        v[e + 0x07] = 0x1A; // name offset
+        put_u64(&mut v, e + 0x08, vcn);
+        put_u64(&mut v, e + 0x10, record_no | REF_SEQ);
+        put_u16(&mut v, e + 0x18, i as u16); // attribute id
+    }
+    v
+}
+
 impl RecordBuilder {
     pub fn new(record_size: usize) -> Self {
-        RecordBuilder { record_size, in_use: true, dir: false, base: 0, attrs: Vec::new() }
+        RecordBuilder { record_size, in_use: true, dir: false, base: None, attrs: Vec::new() }
     }
 
     pub fn not_in_use(mut self) -> Self {
@@ -84,8 +148,11 @@ impl RecordBuilder {
         self
     }
 
+    /// Makes this an extension record of `record_no`. The reference carries
+    /// a sequence number, so `base(0)` (an extension record of `$MFT`) is a
+    /// non-zero reference like on a real volume.
     pub fn base(mut self, record_no: u64) -> Self {
-        self.base = record_no;
+        self.base = Some(record_no);
         self
     }
 
@@ -102,9 +169,25 @@ impl RecordBuilder {
         self.file_name_utf16(parent, &utf16, namespace)
     }
 
-    pub fn file_name_utf16(mut self, parent: u64, name: &[u16], namespace: u8) -> Self {
+    pub fn file_name_utf16(self, parent: u64, name: &[u16], namespace: u8) -> Self {
+        self.file_name_full(parent, name, namespace, 0, 0)
+    }
+
+    /// A `$FILE_NAME` marked as a reparse point (file attribute `0x400` at
+    /// value offset `0x38`) whose reparse tag at `0x3C` is `tag`.
+    pub fn file_name_reparse(self, parent: u64, name: &str, namespace: u8, tag: u32) -> Self {
+        let utf16: Vec<u16> = name.encode_utf16().collect();
+        self.file_name_full(parent, &utf16, namespace, 0x400, tag)
+    }
+
+    /// `file_attributes` goes to value offset `0x38`, `ea_or_reparse` (packed
+    /// EA size or reparse tag) to `0x3C` (ntfs3 `NTFS_DUP_INFO.fa` and
+    /// `.extend_data`, inside `ATTR_FILE_NAME` at `0x08`).
+    fn file_name_full(mut self, parent: u64, name: &[u16], namespace: u8, file_attributes: u32, ea_or_reparse: u32) -> Self {
         let mut v = vec![0u8; 0x42 + 2 * name.len()];
         put_u64(&mut v, 0x00, parent | REF_SEQ);
+        put_u32(&mut v, 0x38, file_attributes);
+        put_u32(&mut v, 0x3C, ea_or_reparse);
         v[0x40] = name.len() as u8;
         v[0x41] = namespace;
         put_name(&mut v, 0x42, name);
@@ -131,36 +214,28 @@ impl RecordBuilder {
         flags: u16,
         total_allocated: u64,
     ) -> Self {
-        let name: Vec<u16> = stream.encode_utf16().collect();
-        // Compressed or sparse attributes carry the extra total_size field,
-        // making the header 0x48 instead of 0x40 bytes (ntfs3 SIZEOF_NONRESIDENT_EX).
-        let extended = flags & (0x0001 | 0x8000) != 0;
-        let name_off = if extended { 0x48 } else { 0x40 };
-        let run_off = align8(name_off + 2 * name.len());
-        let len = align8(run_off + runs.len() + 1); // + terminator byte
-        let clusters: u64 = decode_runs(runs)
-            .map(|r| r.iter().map(|x| x.clusters).sum())
-            .unwrap_or(0);
-        let mut a = vec![0u8; len];
-        put_u32(&mut a, 0x00, ATTR_DATA);
-        put_u32(&mut a, 0x04, len as u32);
-        a[0x08] = 1; // non-resident
-        a[0x09] = name.len() as u8;
-        put_u16(&mut a, 0x0A, name_off as u16);
-        put_u16(&mut a, 0x0C, flags);
-        put_u64(&mut a, 0x10, start_vcn);
-        put_u64(&mut a, 0x18, (start_vcn + clusters).saturating_sub(1));
-        put_u16(&mut a, 0x20, run_off as u16);
-        a[0x22] = if flags & 0x0001 != 0 { 4 } else { 0 }; // compression unit
-        put_u64(&mut a, 0x28, allocated);
-        put_u64(&mut a, 0x30, real);
-        put_u64(&mut a, 0x38, real);
-        if extended {
-            put_u64(&mut a, 0x40, total_allocated);
-        }
-        put_name(&mut a, name_off, &name);
-        a[run_off..run_off + runs.len()].copy_from_slice(runs);
+        let a = nonresident_attr(ATTR_DATA, stream, start_vcn, runs, allocated, real, flags, total_allocated);
         self.attrs.push((ATTR_DATA, a));
+        self
+    }
+
+    /// Sets the initialized size (offset `0x38`) of the last non-resident
+    /// `$DATA` added; `data_nonresident` sets it to the real size.
+    pub fn initialized(mut self, len: u64) -> Self {
+        let (_, a) = self
+            .attrs
+            .iter_mut()
+            .rev()
+            .find(|(t, a)| *t == ATTR_DATA && a[0x08] == 1)
+            .expect("no non-resident $DATA to change");
+        put_u64(a, 0x38, len);
+        self
+    }
+
+    /// A non-resident `$REPARSE_POINT` of `len` bytes in `runs`.
+    pub fn reparse_nonresident(mut self, runs: &[u8], len: u64) -> Self {
+        let a = nonresident_attr(ATTR_REPARSE, "", 0, runs, len.next_multiple_of(4096), len, 0, 0);
+        self.attrs.push((ATTR_REPARSE, a));
         self
     }
 
@@ -173,19 +248,15 @@ impl RecordBuilder {
 
     /// Entries are (attribute type, start VCN, record number).
     pub fn attr_list_resident(mut self, entries: &[(u32, u64, u64)]) -> Self {
-        let entry_len = 0x20; // 0x1A rounded up to 8
-        let mut v = vec![0u8; entry_len * entries.len()];
-        for (i, &(attr_type, vcn, record_no)) in entries.iter().enumerate() {
-            let e = i * entry_len;
-            put_u32(&mut v, e, attr_type);
-            put_u16(&mut v, e + 0x04, entry_len as u16);
-            v[e + 0x06] = 0; // name length
-            v[e + 0x07] = 0x1A; // name offset
-            put_u64(&mut v, e + 0x08, vcn);
-            put_u64(&mut v, e + 0x10, record_no | REF_SEQ);
-            put_u16(&mut v, e + 0x18, i as u16); // attribute id
-        }
+        let v = attr_list_bytes(entries);
         self.attrs.push((ATTR_LIST, resident_attr(ATTR_LIST, &[], &v, 0)));
+        self
+    }
+
+    /// A non-resident `$ATTRIBUTE_LIST` of `len` bytes stored in `runs`.
+    pub fn attr_list_nonresident(mut self, runs: &[u8], len: u64) -> Self {
+        let a = nonresident_attr(ATTR_LIST, "", 0, runs, len.next_multiple_of(4096), len, 0, 0);
+        self.attrs.push((ATTR_LIST, a));
         self
     }
 
@@ -215,7 +286,7 @@ impl RecordBuilder {
         let flags = u16::from(self.in_use) | if self.dir { 0x02 } else { 0 };
         put_u16(&mut r, 0x16, flags);
         put_u32(&mut r, 0x1C, size as u32);
-        put_u64(&mut r, 0x20, if self.base == 0 { 0 } else { self.base | REF_SEQ });
+        put_u64(&mut r, 0x20, self.base.map_or(0, |b| b | REF_SEQ));
         put_u16(&mut r, 0x28, attrs.len() as u16); // next attribute id
 
         let mut pos = attr_off;

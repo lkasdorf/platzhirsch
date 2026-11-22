@@ -423,8 +423,23 @@ mod tests {
         assert_eq!(s.orphaned, 2);
         assert!(t.children(root).is_empty());
         assert!(t.children(1).is_empty());
-        // path of a cycle member must terminate
-        let _ = t.path(1);
+        // path of a cycle member ends after one step per entry
+        assert_eq!(t.path(1), "a\\b\\a");
+        assert_eq!(t.path(2), "b\\a\\b");
+    }
+
+    #[test]
+    fn child_of_a_file_is_orphaned() {
+        let mut b = TreeBuilder::with_capacity(3, 8);
+        let root = b.push("r", NO_PARENT, 0, 0, 0, F_DIR); // 0
+        let file = b.push("f", root, 5, 5, 0, 0); // 1
+        let c = b.push("c", file, 7, 7, 0, 0); // 2, parent is a file
+        let (t, s) = b.finish(root);
+        assert_eq!(s.orphaned, 1);
+        assert_eq!(t.parent(c), None);
+        assert!(t.children(file).is_empty());
+        assert_eq!(t.children(root), &[file]);
+        assert_eq!((t.size(root), t.file_count(root)), (5, 1));
     }
 
     #[test]
