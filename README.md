@@ -128,8 +128,8 @@ The design document and the implementation plan are in
   and the space folders need for their own index is not counted. This is why the
   allocated total of a drive is slightly below its used space.
 - A cloud folder that is not on this machine is refused as a scan target. The check
-  looks at the chosen folder itself. It does not catch a link that points into such a
-  folder, and it is skipped when the folder's parent cannot be listed.
+  looks at every folder on the path to the chosen folder, also behind links. It stops at
+  the first folder whose parent cannot be listed.
 - The drive list is read once when the program starts. A drive plugged in later appears
   after a restart.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
