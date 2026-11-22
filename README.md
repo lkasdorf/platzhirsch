@@ -144,10 +144,11 @@ The design document and the implementation plan are in
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
 - Screen readers get the names of all controls and of each table row through the Windows
-  accessibility interface (UI Automation), and the table can be used fully from the
-  keyboard. This was checked through the accessibility tree, not with every screen
-  reader. The treemap has no keyboard navigation of its own; it follows the table's
-  selection. The divider between table and treemap cannot be moved with the keyboard.
+  accessibility interface (UI Automation). In the table, selecting, expanding, sorting,
+  the context menu and copying work from the keyboard; column widths and the divider
+  between table and treemap can only be changed with the mouse. This was checked through
+  the accessibility tree, not with every screen reader. The treemap has no keyboard
+  navigation of its own; it follows the table's selection.
 - The executable is not code-signed, so Windows SmartScreen may warn on the first start.
 
 ## License

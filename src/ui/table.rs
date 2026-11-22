@@ -49,6 +49,11 @@ const ARROW_WIDTH: f32 = 14.0;
 const BAR_COLOR: Color32 = Color32::from_rgba_unmultiplied_const(240, 170, 50, 110);
 /// Id salt of the `TableBuilder`; the column resize handles derive their ids from it.
 const TABLE_SALT: &str = "tree_table";
+/// The accessible name of the table.
+const TABLE_NAME: &str = "Folders";
+/// A menu asked for with the keyboard waits this many frames for its row to be on screen:
+/// a row scrolled into view is drawn in the next frame and has its rectangle in the one after.
+const MENU_WAIT_PASSES: u64 = 2;
 
 /// The table's own `Ui`: the tree in the accessibility tree, and the one
 /// keyboard focus target for all rows.
@@ -363,7 +368,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     let builder = UiBuilder::new().scope_id(table_id()).sense(Sense::FOCUSABLE).accessibility_role(Role::Tree);
     let shown = ui.scope_builder(builder, |ui| table(ui, tree, view, scroll_to));
     let response = shown.response;
-    response.widget_info(|| WidgetInfo::new(Role::Tree));
+    response.widget_info(|| WidgetInfo::labeled(Role::Tree, true, TABLE_NAME));
     // After the table's `Ui` has ended: it gives up the focus when the click
     // that selected a row did not land on the `Ui` itself.
     if shown.inner {
@@ -412,15 +417,21 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
     if keys.copy {
         ctx.copy_text(full_path(tree, view.selected));
     }
-    // The menu opens when the selected row is drawn, this frame or after scrolling to it.
+    // The menu opens when the selected row is on screen: this frame, or within
+    // two frames after scrolling to it. A row not on screen by then drops the
+    // request, so the menu cannot pop open much later.
     let menu_id = table.with("menu_for_row");
+    let pass = ctx.cumulative_pass_nr();
     if keys.menu {
-        ctx.data_mut(|d| d.insert_temp(menu_id, view.selected));
+        ctx.data_mut(|d| d.insert_temp(menu_id, (view.selected, pass)));
         scroll_to = Some(view.selected_row());
     }
-    let menu_for = ctx.data(|d| d.get_temp::<NodeId>(menu_id)).filter(|&n| n == view.selected);
+    let menu_for = ctx
+        .data(|d| d.get_temp::<(NodeId, u64)>(menu_id))
+        .filter(|&(n, asked)| n == view.selected && pass <= asked.saturating_add(MENU_WAIT_PASSES))
+        .map(|(n, _)| n);
     if menu_for.is_none() {
-        ctx.data_mut(|d| d.remove_temp::<NodeId>(menu_id));
+        ctx.data_mut(|d| d.remove_temp::<(NodeId, u64)>(menu_id));
     }
 
     // A context menu belongs to the row index it was opened on; when the
@@ -460,6 +471,10 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
             .column(Column::initial(90.0).at_least(70.0));
         if let Some(row) = scroll_to {
             builder = builder.scroll_to_row(row, None);
+        }
+        if keys.menu {
+            // Jump to the row, so it is drawn by the next frame and its menu can open.
+            builder = builder.animate_scrolling(false);
         }
         builder
             .header(row_height, |mut header| {
@@ -510,6 +525,8 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                         let expandable = is_dir && !tree.children(node).is_empty();
                         ctx.accesskit_node_builder(item.id, |n| {
                             n.set_selected(selected);
+                            // Zero-based in AccessKit: UI Automation reports the root row as level 1.
+                            n.set_level(r.depth as usize);
                             if expandable {
                                 n.set_expanded(view.is_expanded(node));
                             }
@@ -528,11 +545,12 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                     if rows_changed {
                         Popup::close_id(&ctx, popup_id);
                     }
-                    let open_by_key = menu_for == Some(node);
+                    // Only on screen: a row drawn just outside the view has no place for the menu.
+                    let open_by_key = menu_for == Some(node) && response.interact_rect.is_positive();
                     if open_by_key {
                         Popup::open_id(&ctx, popup_id);
                         ctx.data_mut(|d| {
-                            d.remove_temp::<NodeId>(menu_id);
+                            d.remove_temp::<(NodeId, u64)>(menu_id);
                             d.insert_temp(return_id, Vec::<Id>::new());
                         });
                     }
@@ -753,6 +771,8 @@ mod tests {
             copied: Vec<String>,
             /// Set: a text field above the table, for the focus rules.
             text: Option<String>,
+            /// Set: the table is not drawn this frame.
+            hidden: bool,
         }
 
         fn harness() -> Harness<'static, State> {
@@ -771,7 +791,9 @@ mod tests {
                         if let Some(text) = &mut s.text {
                             ui.add(egui::TextEdit::singleline(text).id(text_field_id()).hint_text("Filter"));
                         }
-                        show(ui, &s.tree, &mut s.view, None);
+                        if !s.hidden {
+                            show(ui, &s.tree, &mut s.view, None);
+                        }
                         ui.ctx().output(|o| {
                             for command in &o.commands {
                                 if let egui::OutputCommand::CopyText(t) = command {
@@ -780,7 +802,7 @@ mod tests {
                             }
                         });
                     },
-                    State { tree, view, copied: Vec::new(), text },
+                    State { tree, view, copied: Vec::new(), text, hidden: false },
                 )
         }
 
@@ -908,9 +930,14 @@ mod tests {
             let root = h.get_by_role_and_label(Role::TreeItem, ROOT);
             assert_eq!(root.accesskit_node().is_selected(), Some(true));
             assert_eq!(root.accesskit_node().data().is_expanded(), Some(true));
+            // AccessKit counts levels from 0; UI Automation adds 1, so the root row is level 1.
+            assert_eq!(root.accesskit_node().level(), Some(0));
             let a = h.get_by_role_and_label(Role::TreeItem, A);
             assert_eq!(a.accesskit_node().is_selected(), Some(false));
             assert_eq!(a.accesskit_node().data().is_expanded(), Some(false));
+            assert_eq!(a.accesskit_node().level(), Some(1));
+            // The tree itself is named.
+            assert!(h.query_by_role_and_label(Role::Tree, "Folders").is_some());
             // A file has no expanded state.
             let top = h.get_by_role_and_label(Role::TreeItem, TOP);
             assert_eq!(top.accesskit_node().data().is_expanded(), None);
@@ -1103,6 +1130,48 @@ mod tests {
             // F10 without Shift does nothing.
             press(&mut h, Key::F10);
             assert!(h.query_by_label("Copy path").is_none());
+        }
+
+        /// A root with 200 files (the table's body is at least 200 points high); the last file is selected but scrolled away.
+        fn long_list() -> Harness<'static, State> {
+            let mut b = TreeBuilder::with_capacity(201, 2048);
+            let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR);
+            for i in 0..200u64 {
+                b.push(&format!("f{i:03}"), root, 1000 - i, 0, 0, 0);
+            }
+            let tree = b.finish(root).0;
+            let mut h = harness();
+            h.set_size(vec2(900.0, 300.0));
+            let s = h.state_mut();
+            s.view = TreeView::new(&tree, Metric::Size);
+            s.view.select_row(200);
+            s.tree = tree;
+            h.run();
+            assert!(h.query_by_label("f199").is_none(), "the selected row is not drawn");
+            h
+        }
+
+        #[test]
+        fn menu_key_on_a_row_scrolled_away_scrolls_to_it_and_opens() {
+            let mut h = long_list();
+            press(&mut h, Key::Menu);
+            assert!(h.query_by_label("f199").is_some());
+            assert!(h.query_by_label("Copy path").is_some());
+        }
+
+        #[test]
+        fn menu_request_is_dropped_when_its_row_is_not_drawn_within_two_frames() {
+            let mut h = long_list();
+            h.key_down(Key::Menu);
+            h.step();
+            // The table is not drawn for a while, so the row cannot be either.
+            h.state_mut().hidden = true;
+            h.run_steps(3);
+            h.state_mut().hidden = false;
+            h.key_up(Key::Menu);
+            h.run();
+            assert!(h.query_by_label("f199").is_some(), "scrolled to the row");
+            assert!(h.query_by_label("Copy path").is_none(), "but the late menu stays closed");
         }
 
         #[test]

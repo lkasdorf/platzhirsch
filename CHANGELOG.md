@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- "Copy path" now copies to the Windows clipboard; in 0.1.0 the path never left the
+  program.
 - Tab no longer stops at every table cell; the table is one stop, and while it has the
   focus the arrow keys move the selection instead of the focus. While a context menu is
   open the arrow keys move within the menu only.
