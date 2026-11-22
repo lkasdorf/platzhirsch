@@ -93,7 +93,7 @@ fn i64_at(rec: &[u8], off: usize) -> i64 {
 }
 
 fn bad_listing(what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("malformed folder listing: {what}"))
+    io::Error::new(io::ErrorKind::InvalidData, format!("Malformed folder listing: {what}"))
 }
 
 /// Decodes a buffer of FILE_ID_BOTH_DIR_INFO records chained by
@@ -159,7 +159,7 @@ impl Drop for DirHandle {
 fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
     let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
     if !path.starts_with(&wide(r"\\?\")) && !path.starts_with(&wide(r"\\.\")) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path without \\\\?\\ prefix"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Path without \\\\?\\ prefix"));
     }
     let mut nt = wide(r"\??\");
     nt.extend_from_slice(&path[4..]);
@@ -177,7 +177,7 @@ fn nt_path(path: &[u16]) -> io::Result<Vec<u16>> {
 fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
     let nt = nt_path(path)?;
     let bytes = u16::try_from(nt.len() * 2)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path too long"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path too long"))?;
     // The buffer is only read; the binding's type is `PWSTR` nonetheless.
     let name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: PWSTR(nt.as_ptr().cast_mut()) };
     let attributes = OBJECT_ATTRIBUTES {

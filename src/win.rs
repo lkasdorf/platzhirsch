@@ -212,7 +212,7 @@ impl RawVolume {
     /// Opens `\\.\X:` with read access only. Needs admin rights.
     pub fn open(letter: char) -> std::io::Result<Self> {
         if !letter.is_ascii_alphabetic() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a drive letter"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Not a drive letter"));
         }
         let path = format!("\\\\.\\{}:", letter.to_ascii_uppercase());
         let file = std::fs::OpenOptions::new()

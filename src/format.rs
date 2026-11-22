@@ -7,7 +7,7 @@ fn group_thousands(n: u128) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -27,12 +27,16 @@ pub fn format_bytes(n: u64) -> String {
         return format!("{} Bytes", group_thousands(u128::from(n)));
     }
     let mut unit_index = 0;
-    while unit_index + 1 < UNITS.len() && n >= 1u64 << (10 * (unit_index as u32 + 2)) {
-        unit_index += 1;
+    loop {
+        let unit = 1u128 << (10 * (unit_index as u32 + 1));
+        let tenths = (u128::from(n) * 10 + unit / 2) / unit;
+        // A value that rounds to 1,024.0 of this unit belongs to the next one (except at PB).
+        if tenths >= 10_240 && unit_index + 1 < UNITS.len() {
+            unit_index += 1;
+            continue;
+        }
+        return format!("{} {}", format_tenths(tenths), UNITS[unit_index]);
     }
-    let unit = 1u128 << (10 * (unit_index as u32 + 1));
-    let tenths = (u128::from(n) * 10 + unit / 2) / unit;
-    format!("{} {}", format_tenths(tenths), UNITS[unit_index])
 }
 
 /// Formats a count with thousands commas, e.g. `1,683,667`.
@@ -81,6 +85,16 @@ mod tests {
     }
 
     #[test]
+    fn unit_is_chosen_after_rounding() {
+        assert_eq!(format_bytes(1_048_575), "1.0 MB");
+        assert_eq!(format_bytes(1_024 * 1_024 - 51), "1.0 MB"); // 1,023.9502 KB rounds up to 1,024.0
+        assert_eq!(format_bytes(1_024 * 1_024 - 52), "1,023.9 KB"); // 1,023.9492 KB rounds down
+        assert_eq!(format_bytes(1_024 * 1_024), "1.0 MB");
+        assert_eq!(format_bytes((1u64 << 30) - 1), "1.0 GB");
+        assert_eq!(format_bytes((1u64 << 50) - 1), "1.0 PB");
+    }
+
+    #[test]
     fn count_has_thousands_separators() {
         assert_eq!(format_count(1_683_667), "1,683,667");
         assert_eq!(format_count(999), "999");
@@ -100,7 +114,12 @@ mod tests {
     #[test]
     fn filetime_is_formatted_as_local_date() {
         const UNIX_EPOCH_FT: i64 = 116_444_736_000_000_000;
-        assert_eq!(format_date(UNIX_EPOCH_FT + 1_795_262_400 * 10_000_000), "21/11/2026"); // 21/11/2026 12:00 UTC
+        // 21/11/2026 12:00 UTC; the local date depends on the time zone of the machine.
+        let text = format_date(UNIX_EPOCH_FT + 1_795_262_400 * 10_000_000);
+        assert!(["20/11/2026", "21/11/2026", "22/11/2026"].contains(&text.as_str()), "{text}");
+        assert_eq!(text.len(), 10);
+        let b = text.as_bytes();
+        assert!(b[2] == b'/' && b[5] == b'/' && text.bytes().filter(u8::is_ascii_digit).count() == 8, "{text}");
         assert_eq!(format_date(0), "");
     }
 }

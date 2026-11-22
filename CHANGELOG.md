@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Sizes just below a unit boundary are shown in the next unit, so 1,048,575 Bytes reads
+  `1.0 MB` instead of `1,024.0 KB`.
+- Read errors are shown in English, with the cause and the Windows error code, instead of
+  in the language of the system.
+
 ## [0.1.0] - 2026-11-22
 
 First release.
