@@ -19,13 +19,15 @@ jobs:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Check that the tag is on main
         run: |
+          $ErrorActionPreference = 'Stop'
           git fetch origin main
+          if ($LASTEXITCODE -ne 0) { Write-Error "Could not fetch main"; exit 1 }
           git merge-base --is-ancestor $env:GITHUB_SHA origin/main
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Tag $env:TAG points at a commit that is not on main"
@@ -34,6 +36,8 @@ jobs:
 
       - name: Install stable Rust
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           rustup update stable --no-self-update
           rustup default stable
           rustc --version
@@ -41,6 +45,8 @@ jobs:
 
       - name: Check that the tag matches the package version
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ($env:TAG -ne "v$version") {
             Write-Error "Tag $env:TAG does not match the package version $version in Cargo.toml"
@@ -55,6 +61,7 @@ jobs:
 
       - name: Checksum
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/platzhirsch.exe dist/platzhirsch.exe
           $hash = (Get-FileHash dist/platzhirsch.exe -Algorithm SHA256).Hash.ToLower()
@@ -64,6 +71,7 @@ jobs:
 
       - name: Release notes
         run: |
+          $ErrorActionPreference = 'Stop'
           # Take this version's section from the changelog, if there is one.
           $version = $env:TAG.TrimStart('v')
           $lines = Get-Content CHANGELOG.md
@@ -77,25 +85,41 @@ jobs:
             }
             if ($inside -and -not $line.StartsWith("[")) { $section += $line }
           }
+          $download = @()
+          $download += "## Download"
+          $download += ""
+          $download += "``platzhirsch.exe`` is a single file for Windows 10 and 11 (x64). No installer."
+          $download += ""
+          $download += "SHA-256: ``$env:SHA256``"
+          $download += ""
+          $download += "The executable is not code-signed, so Windows SmartScreen may warn on the first start."
+          [IO.File]::WriteAllText("$PWD/dist/download.md", ($download -join "`n") + "`n")
           $notes = @()
           if ($section.Count -gt 0) { $notes += ($section -join "`n").Trim(); $notes += "" }
-          $notes += "## Download"
-          $notes += ""
-          $notes += "``platzhirsch.exe`` is a single file for Windows 10 and 11 (x64). No installer."
-          $notes += ""
-          $notes += "SHA-256: ``$env:SHA256``"
-          $notes += ""
-          $notes += "The executable is not code-signed, so Windows SmartScreen may warn on the first start."
+          $notes += $download
           [IO.File]::WriteAllText("$PWD/dist/notes.md", ($notes -join "`n") + "`n")
           Get-Content dist/notes.md
 
       - name: Attach to the GitHub release
         run: |
+          $ErrorActionPreference = 'Stop'
           gh release view $env:TAG --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            # The release already exists (created by hand): add or replace the files.
-            gh release upload $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --clobber
-          } else {
+          if ($LASTEXITCODE -ne 0) {
             gh release create $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --title "Platzhirsch $env:TAG" --notes-file dist/notes.md --verify-tag
+            exit $LASTEXITCODE
           }
+          # The release already exists (created by hand, or by an earlier run of this workflow):
+          # replace the files and bring the checksum in its notes up to date.
+          gh release upload $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $body = (gh release view $env:TAG --json body --jq .body | Out-String).TrimEnd()
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $checksum = "SHA-256: ``$env:SHA256``"
+          if ($body -match 'SHA-256: `[0-9a-f]{64}`') {
+            $updated = $body -replace 'SHA-256: `[0-9a-f]{64}`', $checksum
+          } else {
+            $updated = ($body + "`n`n" + (Get-Content dist/download.md -Raw)).Trim()
+          }
+          [IO.File]::WriteAllText("$PWD/dist/notes-updated.md", $updated + "`n")
+          gh release edit $env:TAG --notes-file dist/notes-updated.md
           exit $LASTEXITCODE
