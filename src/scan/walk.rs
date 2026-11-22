@@ -45,6 +45,8 @@ const MAX_THREADS: usize = 16;
 const MIN_THREADS: usize = 2;
 /// Workers when the number of processors cannot be determined.
 const FALLBACK_THREADS: usize = 4;
+/// The tree's name buffer must stay below 4 GiB (see `TreeBuilder::push`).
+const NAMES_LIMIT: usize = u32::MAX as usize;
 
 // Field offsets of FILE_ID_BOTH_DIR_INFO, taken from the crate's layout
 // (MS-FSCC 2.4.17 FileIdBothDirectoryInformation).
@@ -407,7 +409,8 @@ impl Queue {
     }
 }
 
-/// Closes the queue if a worker panics, so the others stop and the scan ends.
+/// Closes the queue if a worker or the coordinating step panics, so the
+/// workers waiting for jobs stop and the scan ends.
 struct CloseOnPanic<'a>(&'a Queue);
 
 impl Drop for CloseOnPanic<'_> {
@@ -426,6 +429,11 @@ fn worker(queue: &Queue, tx: mpsc::Sender<Done>, cancel: &AtomicBool) {
             return;
         }
     }
+}
+
+/// The tree cannot take more names; worded as in the MFT scan.
+fn names_too_long() -> ScanError {
+    ScanError::Io(io::Error::other("file names exceed 4 GiB"))
 }
 
 fn scan_error(e: io::Error) -> ScanError {
@@ -522,12 +530,15 @@ fn check_levels(path: &[u16], stop_at_link: bool) -> LevelCheck {
 
 /// The path that is listed and whether it still needs a check of every
 /// level, from the outcome of the first check of the path as given and the
-/// result of resolving it. Whenever the first check ended at a link, the
-/// listed path (the resolved one, or the given one if resolution failed) is
-/// checked in full, also when resolution returned the same path.
+/// result of resolving it. The listed path (the resolved one, or the given
+/// one if resolution failed) is checked in full whenever the first check
+/// ended at a link, also when resolution returned the same path, and
+/// whenever resolution returned another path, also without a link level on
+/// the way (a `subst` or mapped drive, whose root has no level at all).
 fn plan_root(given: Vec<u16>, first: LevelCheck, resolved: Option<Vec<u16>>) -> (Vec<u16>, bool) {
-    let listed = resolved.unwrap_or(given);
-    (listed, first == LevelCheck::ReachedLink)
+    let elsewhere = resolved.as_ref().is_some_and(|r| *r != given);
+    let check_fully = first == LevelCheck::ReachedLink || elsewhere;
+    (resolved.unwrap_or(given), check_fully)
 }
 
 /// The final path of `path` (verbatim, no NUL) with links resolved, in the
@@ -631,6 +642,17 @@ fn entry_attributes(path: &[u16]) -> Option<(u32, u32)> {
 /// The root gets its absolute path without a trailing backslash as its name.
 /// A root that is a link is listed as the folder it points to.
 pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanError> {
+    scan_walk_limited(root, progress, NAMES_LIMIT)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the coordinating step panic once it has received a listing (tests only).
+    static PANIC_IN_COORDINATOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `scan_walk` with at most `names_limit` bytes of names in the tree, the root's included.
+fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Result<ScanResult, ScanError> {
     let started = Instant::now();
     if progress.cancel.load(Ordering::Relaxed) {
         return Err(ScanError::Cancelled);
@@ -644,7 +666,8 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     // The path as given is checked before anything on it is opened: opening
     // an online-only item can already make the provider fetch it. Links on
     // the way are checked themselves; what lies behind them is checked once
-    // they are resolved.
+    // they are resolved, and so is a path that resolves elsewhere without a
+    // link on the way.
     let first = check_levels(&given, true);
     if first == LevelCheck::Refuse {
         return Err(ScanError::OnlineOnly);
@@ -657,6 +680,10 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     }
     ensure_directory(&root_path, false).map_err(scan_error)?;
     let root_name = root_name(root).map_err(scan_error)?;
+    if root_name.len() > names_limit {
+        return Err(names_too_long());
+    }
+    let mut name_bytes = root_name.len();
 
     let mut b = TreeBuilder::with_capacity(4096, 64 * 1024);
     let root_id = b.push(&root_name, NO_PARENT, 0, 0, 0, F_DIR);
@@ -666,6 +693,9 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
     let (mut unreadable, mut online_only) = (0u64, 0u64);
 
     let outcome = std::thread::scope(|s| {
+        // If this closure panics, the workers waiting for jobs must stop, or
+        // the scope would wait for them for good.
+        let _close = CloseOnPanic(&queue);
         let (tx, rx) = mpsc::channel::<Done>();
         for _ in 0..threads {
             let tx = tx.clone();
@@ -674,12 +704,16 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
         }
         drop(tx);
         let mut pending = 1usize;
-        let result = loop {
+        let result = 'listings: loop {
             // Err only if every worker is gone (a panic); the scope re-raises it.
             let Ok(Done { job, listing }) = rx.recv() else {
                 break Err(ScanError::Io(io::Error::other("Folder listing aborted")));
             };
             pending -= 1;
+            #[cfg(test)]
+            if PANIC_IN_COORDINATOR.get() {
+                panic!("the coordinating step panics on purpose in this test");
+            }
             let entries = match listing {
                 Listing::Cancelled => break Err(ScanError::Cancelled),
                 Listing::Complete(entries) => entries,
@@ -693,7 +727,11 @@ pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanErr
             progress.done.fetch_add(entries.len() as u64, Ordering::Relaxed);
             let mut jobs = Vec::new();
             for e in entries {
-                let link = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
+                if name_bytes.saturating_add(e.name.len()) > names_limit {
+                    break 'listings Err(names_too_long());
+                }
+                name_bytes += e.name.len();
+                let link =e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
                 if e.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                     b.push(&e.name, job.dir, e.size, e.allocated, e.mtime, if link { F_LINK } else { 0 });
                     continue;
@@ -797,12 +835,19 @@ mod tests {
     }
 
     #[test]
-    fn listed_path_is_checked_in_full_after_a_link() {
+    fn listed_path_is_checked_in_full_after_a_link_or_when_it_resolves_elsewhere() {
         let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
         let given = w(r"\\?\C:\mnt\a");
         let other = w(r"\\?\D:\a");
-        // The first check covered every level: no second check.
-        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(other.clone())), (other.clone(), false));
+        // No link level on the way, but the path resolves elsewhere (a `subst`
+        // or mapped drive): the resolved one in full.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(other.clone())), (other.clone(), true));
+        let drive = w(r"\\?\X:\");
+        let behind = w(r"\\?\C:\Users\me\OneDrive");
+        assert_eq!(plan_root(drive, LevelCheck::Proceed, Some(behind.clone())), (behind, true));
+        // Resolution returned the given path: the first check covered every level, one pass only.
+        assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, Some(given.clone())), (given.clone(), false));
+        // Resolution failed: the first check covered every level, one pass only.
         assert_eq!(plan_root(given.clone(), LevelCheck::Proceed, None), (given.clone(), false));
         // It ended at a link and resolution failed: the given path in full.
         assert_eq!(plan_root(given.clone(), LevelCheck::ReachedLink, None), (given.clone(), true));
@@ -880,6 +925,51 @@ mod tests {
         let resolved_root = final_path(&root).expect("drive root resolved");
         assert!(same(&resolved_root, &format!(r"\\?\{drive}\")));
         assert_eq!(final_path(&verbatim_path(&tmp.path().join("missing")).unwrap()), None);
+    }
+
+    /// Runs `scan_walk_limited` on another thread and waits at most 30 seconds
+    /// for it, so a walk that hangs fails the test instead of the suite.
+    /// `Some(None)` if the walk panicked, `None` if it did not return in time.
+    fn walk_with_timeout(
+        root: &Path,
+        names_limit: usize,
+        panic_in_coordinator: bool,
+    ) -> Option<Option<Result<ScanResult, ScanError>>> {
+        let (tx, rx) = mpsc::channel();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            PANIC_IN_COORDINATOR.set(panic_in_coordinator);
+            let outcome = std::panic::catch_unwind(|| scan_walk_limited(&root, &Progress::default(), names_limit));
+            let _ = tx.send(outcome.ok());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
+    }
+
+    #[test]
+    fn panic_in_the_coordinating_step_ends_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, true)
+            .expect("the walk hangs after a panic in its coordinating step");
+        assert!(outcome.is_none(), "the panic does not propagate");
+        // Without the injected panic the same walk succeeds.
+        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, false).expect("the walk hangs");
+        assert!(matches!(outcome, Some(Ok(_))));
+    }
+
+    #[test]
+    fn names_beyond_the_limit_end_the_walk_with_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tempfile::tempdir_in(tmp.path()).unwrap();
+        let file = tempfile::NamedTempFile::new_in(tmp.path()).unwrap();
+        let name_len = |p: &Path| p.file_name().unwrap().to_str().unwrap().len();
+        let total = root_name(tmp.path()).unwrap().len() + name_len(sub.path()) + name_len(file.path());
+        let walk = |limit| walk_with_timeout(tmp.path(), limit, false).expect("the walk hangs").expect("the walk panics");
+        let tree = walk(total).expect("names within the limit");
+        assert_eq!(tree.tree.len(), 3);
+        for limit in [total - 1, root_name(tmp.path()).unwrap().len() - 1] {
+            let err = walk(limit).err().expect("names beyond the limit accepted");
+            assert_eq!(err.to_string(), "Read error: file names exceed 4 GiB");
+        }
     }
 
     #[test]

@@ -54,7 +54,7 @@ fn scanning_label(ui: &mut egui::Ui, elapsed: Duration) {
     });
 }
 
-/// What a running scan shows:`Cancelling…` once Cancel was pressed, else the dots.
+/// What a running scan shows: `Cancelling…` once Cancel was pressed, else the dots.
 pub(super) fn scan_indicator(progress: &Progress, elapsed: Duration) -> String {
     if progress.cancel.load(Ordering::Relaxed) {
         CANCELLING.to_string()

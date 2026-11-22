@@ -240,6 +240,12 @@ fn build_mesh(tiles: &[Tile], map: Mapping, dark: bool) -> Mesh {
     mesh
 }
 
+/// The tooltip line of a folder whose `n` entries are too small to draw.
+fn too_small_text(n: u64) -> String {
+    let noun = if n == 1 { "entry" } else { "entries" };
+    format!("{} {noun} too small to draw", format_count(n))
+}
+
 /// The folder the treemap shows: the selection, or a selected file's parent.
 pub fn shown_node(tree: &Tree, selected: NodeId) -> NodeId {
     if tree.is_dir(selected) {
@@ -337,7 +343,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
             ui.label(format_bytes(tree.metric(tile.node, metric)));
             if tile.elided {
                 let n = u64::from(tree.file_count(tile.node)) + u64::from(tree.dir_count(tile.node));
-                ui.label(format!("{} entries too small to draw", format_count(n)));
+                ui.label(too_small_text(n));
             }
             if go_up {
                 ui.label("Click to go up");
@@ -369,6 +375,14 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn too_small_text_counts_in_singular_and_plural() {
+        assert_eq!(too_small_text(1), "1 entry too small to draw");
+        assert_eq!(too_small_text(0), "0 entries too small to draw");
+        assert_eq!(too_small_text(2), "2 entries too small to draw");
+        assert_eq!(too_small_text(1_683_667), "1,683,667 entries too small to draw");
     }
 
     #[test]

@@ -45,8 +45,9 @@ const CHUNK_BYTES: u64 = 8 << 20;
 /// Chunks read ahead of the parser.
 const CHUNKS_IN_FLIGHT: usize = 2;
 /// The boot sector is the first 512 bytes. A raw volume only accepts reads
-/// of whole sectors, so read 4 KiB, and 64 KiB (the largest sector size
-/// NTFS allows) if the device rejects that.
+/// of whole sectors, so read 4 KiB, and 64 KiB if the device rejects that:
+/// a whole number of sectors for every power-of-two sector size the boot
+/// sector's 16-bit field can state (at most 32 KiB).
 const BOOT_READ_LEN: usize = 4096;
 const BOOT_READ_LEN_LARGE: usize = 65536;
 const ROOT_RECORD: usize = 5;

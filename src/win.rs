@@ -13,6 +13,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode, THREAD_ERROR_MODE};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
@@ -219,9 +220,38 @@ pub fn show_error(title: &str, text: &str) {
     let _ = unsafe { MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR) };
 }
 
-/// Opens an Explorer window with `path` selected.
+/// The argument that makes Explorer select `path`, or `None` if `path`
+/// contains a `"`: it would end the quoted argument and turn the rest into
+/// further Explorer arguments. Win32 cannot address such a name anyway.
+fn explorer_select_arg(path: &str) -> Option<String> {
+    (!path.contains('"')).then(|| format!("/select,\"{path}\""))
+}
+
+/// `<Windows directory>\explorer.exe`, with the directory from the system
+/// (not from an environment variable); `None` if it cannot be read. A full
+/// path, so no `explorer.exe` in this program's own folder is started.
+fn explorer_program() -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u16; MAX_PATH as usize + 1];
+    for _ in 0..2 {
+        // SAFETY: `buf` is a live, writable buffer whose length the binding passes.
+        let n = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+        if n == 0 {
+            return None;
+        }
+        if n < buf.len() {
+            return Some(std::path::PathBuf::from(OsString::from_wide(&buf[..n])).join("explorer.exe"));
+        }
+        // Too small: `n` is the size needed, including the NUL.
+        buf = vec![0u16; n];
+    }
+    None
+}
+
+/// Opens an Explorer window with `path` selected. Starts nothing if `path`
+/// contains a `"` or the Windows directory cannot be read.
 pub fn reveal_in_explorer(path: &str) {
-    let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{path}\"")).spawn();
+    let (Some(arg), Some(program)) = (explorer_select_arg(path), explorer_program()) else { return };
+    let _ = std::process::Command::new(program).raw_arg(arg).spawn();
 }
 
 /// Converts a FILETIME (100 ns since 1601, UTC) to a local date; `None` if `ft <= 0`.
@@ -339,6 +369,30 @@ mod tests {
         // The letter of the path is the one asked about.
         let only_e_fixed = |l| if l == 'E' { DRIVE_FIXED } else { DRIVE_REMOTE };
         assert_eq!(elevation_dir(Path::new(r"E:\x"), only_e_fixed), Some(Path::new(r"E:\x")));
+    }
+
+    #[test]
+    fn explorer_gets_the_path_only_when_it_cannot_break_out_of_the_quotes() {
+        // A `"` would end the quoted argument; nothing is started.
+        assert_eq!(explorer_select_arg(r#"E:\odd"name.txt"#), None);
+        assert_eq!(explorer_select_arg(r#"E:\x" /root,C:\"#), None);
+        for (path, arg) in [
+            (r"C:\Users\x\file.txt", r#"/select,"C:\Users\x\file.txt""#),
+            (r"C:\Program Files\a b.txt", r#"/select,"C:\Program Files\a b.txt""#),
+            (r"D:\one,two\x,y.txt", r#"/select,"D:\one,two\x,y.txt""#),
+            (r"D:\Tom & Jerry\a&b.txt", r#"/select,"D:\Tom & Jerry\a&b.txt""#),
+            (r"\\nas\share\d", r#"/select,"\\nas\share\d""#),
+        ] {
+            assert_eq!(explorer_select_arg(path).as_deref(), Some(arg), "{path}");
+        }
+    }
+
+    #[test]
+    fn explorer_is_started_from_the_windows_directory() {
+        let program = explorer_program().expect("Windows directory");
+        assert!(program.is_absolute(), "{}", program.display());
+        assert!(program.ends_with("explorer.exe"), "{}", program.display());
+        assert!(program.is_file(), "{}", program.display());
     }
 
     #[test]

@@ -56,6 +56,15 @@ const BANNED_WRITE: &[&str] = &[
     ".create(true)",
     ".create_new(true)",
     ".truncate(true)",
+    // Open options that set the access mask or the open flags directly.
+    ".access_mode(",
+    ".custom_flags(",
+    // Whatever access the caller may get, write and delete included.
+    "MAXIMUM_ALLOWED",
+    // File system control requests, which can change a volume.
+    "NtFsControlFile",
+    // An open that deletes the file when its handle is closed.
+    "FILE_DELETE_ON_CLOSE",
     "\"cmd\"",
     "cmd.exe",
     // Starting a process is allowlisted, not free (see `ALLOWED`).
@@ -94,11 +103,7 @@ const ALLOWED: &[(&str, &str, usize)] = &[
         1,
     ), // restarts the program itself with administrator rights
     ("src/win.rs", "// ShellExecuteW reports success with a value above 32.", 1), // comment on that call
-    (
-        "src/win.rs",
-        "let _ = std::process::Command::new(\"explorer.exe\").raw_arg(format!(\"/select,\\\"{path}\\\"\")).spawn();",
-        1,
-    ),
+    ("src/win.rs", "let _ = std::process::Command::new(program).raw_arg(arg).spawn();", 1),
 ];
 
 /// Package-name prefixes of network libraries: a lock-file package whose name
@@ -452,6 +457,21 @@ fn access_rights_literal_and_new_bans() {
     }
     for fine in ["let p = Process::new();", "let a = FILE_ADD;", "let s = \"shell\";"] {
         assert_eq!(hit(fine), 0, "reported: {fine}");
+    }
+}
+
+#[test]
+fn checker_flags_raw_open_options_and_device_control() {
+    let rules = Rules { substrings: BANNED_WRITE, nocase: BANNED_NOCASE, words: BANNED_WORDS };
+    let hit = |line: &str| check("src/x.rs", line, &rules, &[], &mut []);
+    for (banned, word) in [
+        ("let f = OpenOptions::new().access_mode(0x4000_0000).open(p)?;", ".access_mode("),
+        ("let f = OpenOptions::new().read(true).custom_flags(0x0400_0000).open(p)?;", ".custom_flags("),
+        ("let access = MAXIMUM_ALLOWED;", "MAXIMUM_ALLOWED"),
+        ("let s = unsafe { NtFsControlFile(h, None, None, None, &mut io, code, None, 0, None, 0) };", "NtFsControlFile"),
+        ("let options = FILE_DELETE_ON_CLOSE.0;", "FILE_DELETE_ON_CLOSE"),
+    ] {
+        assert_eq!(hit(banned), [format!("src/x.rs:1: `{word}`")], "{banned}");
     }
 }
 

@@ -86,10 +86,17 @@ enum NextPhase {
 /// Decides what follows when something arrives from the scan thread. `method` and
 /// `target` describe the scan that ran, `cancelled` whether Cancel was pressed.
 /// After Cancel whatever was sent is dropped. A thread that ended without sending is
-/// reported even then: that is a fault, not the user's choice.
+/// reported even then: that is a fault, not the user's choice. After the fast scan of a
+/// volume, that offers the slow scan like any other fast-scan error.
 fn after_scan(method: ScanMethod, target: &ScanTarget, cancelled: bool, arrival: Arrival) -> NextPhase {
     let outcome = match arrival {
-        Arrival::Ended => return NextPhase::Failed { message: SCAN_ENDED.into(), offer_walk: None },
+        Arrival::Ended => {
+            let offer_walk = match (method, target) {
+                (ScanMethod::Mft, ScanTarget::Volume(_)) => Some(target.clone()),
+                _ => None,
+            };
+            return NextPhase::Failed { message: SCAN_ENDED.into(), offer_walk };
+        }
         Arrival::Sent(_) if cancelled => return NextPhase::Idle,
         Arrival::Sent(outcome) => *outcome,
     };
@@ -674,9 +681,16 @@ mod tests {
     #[test]
     fn thread_ended_without_result_fails() {
         for cancelled in [false, true] {
+            // After the fast scan of a volume, the slow scan is offered as after any other fast-scan error.
             let next = after_scan(ScanMethod::Mft, &volume_c(), cancelled, Arrival::Ended);
-            assert!(matches!(next, NextPhase::Failed { ref message, offer_walk: None }
+            assert!(matches!(next, NextPhase::Failed { ref message, offer_walk: Some(ScanTarget::Volume('C')) }
                 if message == "The scan ended unexpectedly."));
+            // After a walk there is nothing slower to offer.
+            for target in [volume_c(), ScanTarget::Folder(r"D:\x".into())] {
+                let next = after_scan(ScanMethod::Walk, &target, cancelled, Arrival::Ended);
+                assert!(matches!(next, NextPhase::Failed { ref message, offer_walk: None }
+                    if message == "The scan ended unexpectedly."));
+            }
         }
     }
 
