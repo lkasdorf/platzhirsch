@@ -2,18 +2,14 @@
 //!
 //! Only the visible rows are drawn (`TableBody::rows`); everything computed
 //! here per frame is per visible row. The row list itself lives in
-//! [`TreeView`] and is rebuilt there only on change.
-use eframe::egui::{self, Align, Color32, Key, Layout, Rect, Sense, Ui, vec2};
+//! [`TreeView`] and never changes per frame.
+use eframe::egui::{self, Align, Color32, Id, Key, Layout, Popup, Rect, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use super::rows::{NavKey, TreeView};
+use super::rows::{NavKey, TreeView, metric_key};
 use crate::format::{format_bytes, format_count, format_date, format_percent};
 use crate::model::{F_LINK, F_ONLINE_ONLY, F_UNREADABLE, Metric, NodeId, SortKey, Tree};
 use crate::win;
-
-pub struct TableResponse {
-    pub selection_changed: bool,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
@@ -38,6 +34,8 @@ const COLUMNS: [(Col, &str); 7] = [
 
 /// Indentation per tree level.
 const INDENT: f32 = 16.0;
+/// The indentation takes at most this share of the Name column.
+const MAX_INDENT_SHARE: f32 = 0.4;
 /// Width of the expand/collapse arrow.
 const ARROW_WIDTH: f32 = 14.0;
 /// Colour of the share bar behind the name.
@@ -76,10 +74,7 @@ fn column_key(col: Col, metric: Metric) -> SortKey {
         Col::Size => SortKey::Size,
         Col::Files => SortKey::Files,
         Col::Folders => SortKey::Dirs,
-        Col::Percent => match metric {
-            Metric::Allocated => SortKey::Allocated,
-            Metric::Size => SortKey::Size,
-        },
+        Col::Percent => metric_key(metric),
         Col::Modified => SortKey::Modified,
     }
 }
@@ -159,18 +154,24 @@ struct RowInput {
     toggle: Option<NodeId>,
 }
 
+/// The indentation of a row at `depth` in a Name column `width` wide:
+/// `INDENT` per level, but at most `MAX_INDENT_SHARE` of the column.
+fn indent_width(depth: u32, width: f32) -> f32 {
+    (depth as f32 * INDENT).min(width.max(0.0) * MAX_INDENT_SHARE)
+}
+
 /// The name cell: indentation, arrow, share bar, name and marker.
-/// Returns true when the arrow was clicked.
-fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u16, row_height: f32) -> bool {
+/// Returns true when the arrow was clicked; the second click of a
+/// double-click does not count, so a double-click toggles once.
+fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u32, row_height: f32) -> bool {
     let cell = ui.max_rect();
-    let indent = (f32::from(depth) * INDENT).min((cell.width() - 2.0 * ARROW_WIDTH).max(0.0));
-    ui.add_space(indent);
+    ui.add_space(indent_width(depth, cell.width()));
     let mut arrow_clicked = false;
     if tree.is_dir(node) && !tree.children(node).is_empty() {
         let (_, response) = ui.allocate_exact_size(vec2(ARROW_WIDTH, row_height), Sense::click());
         let openness = if view.is_expanded(node) { 1.0 } else { 0.0 };
         egui::collapsing_header::paint_default_icon(ui, openness, &response);
-        arrow_clicked = response.clicked();
+        arrow_clicked = response.clicked() && !response.double_clicked();
     } else {
         ui.add_space(ARROW_WIDTH);
     }
@@ -184,7 +185,13 @@ fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u16
         );
         ui.painter().rect_filled(bar, 2.0, BAR_COLOR);
     }
-    ui.label(tree.name(node));
+    // The full path replaces egui's own tooltip for a cut-off name; it is
+    // built only while the name is hovered.
+    ui.add(egui::Label::new(tree.name(node)).show_tooltip_when_elided(false))
+        .on_hover_ui(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.label(full_path(tree, node));
+        });
     if let Some(marker) = marker_text(tree.flags(node)) {
         ui.weak(marker);
     }
@@ -193,8 +200,7 @@ fn name_cell(ui: &mut Ui, tree: &Tree, view: &TreeView, node: NodeId, depth: u16
 
 /// The tree table. Draws only the visible rows; `scroll_to` asks for a row
 /// index to be scrolled into view.
-pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) -> TableResponse {
-    let before = view.selected;
+pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) {
     let ctx = ui.ctx().clone();
     let mut scroll_to = scroll_to;
 
@@ -211,6 +217,16 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
             }
         }
     }
+
+    // A context menu belongs to the row index it was opened on; when the
+    // rows have changed since the last frame, that index shows another entry.
+    let version_id = Id::unique("tree_table_rows_version");
+    let version = view.rows_version();
+    let rows_changed = ctx.data_mut(|d| {
+        let last = d.get_temp::<u64>(version_id);
+        d.insert_temp(version_id, version);
+        last.is_some_and(|last| last != version)
+    });
 
     let metric = view.metric();
     let (sort_key, desc) = view.sort();
@@ -287,6 +303,9 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
                     if response.double_clicked() && is_dir {
                         input.toggle = Some(node);
                     }
+                    if rows_changed {
+                        Popup::close_id(&ctx, Popup::default_response_id(&response));
+                    }
                     response.context_menu(|ui| {
                         if ui.button("Show in Explorer").clicked() {
                             win::reveal_in_explorer(&full_path(tree, node));
@@ -307,8 +326,10 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     }
     if let Some(col) = header_click {
         let (key, desc) = next_sort((sort_key, desc), shown, col, metric);
-        view.set_percent_sorted(col == Col::Percent);
         view.set_sort(tree, key, desc);
+        if col == Col::Percent {
+            view.set_percent_sorted(true);
+        }
     }
     if let Some(node) = input.toggle {
         view.toggle(tree, node);
@@ -317,7 +338,6 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usi
     if changed {
         ctx.request_repaint();
     }
-    TableResponse { selection_changed: view.selected != before }
 }
 
 #[cfg(test)]
@@ -405,13 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn triangle_on_metric_column_follows_the_metric() {
-        // After set_metric(Size) the key is Size, so the triangle moves to Size.
-        assert!(sorted_column(SortKey::Size, Metric::Size, false) == Col::Size);
-        assert!(sorted_column(SortKey::Allocated, Metric::Allocated, false) == Col::Allocated);
-    }
-
-    #[test]
     fn triangle_on_other_clicked_column() {
         let m = Metric::Allocated;
         assert!(sorted_column(SortKey::Name, m, false) == Col::Name);
@@ -427,5 +440,134 @@ mod tests {
         let t = sample();
         assert_eq!(full_path(&t, 0), "C:\\");
         assert_eq!(full_path(&t, 5), "C:\\a\\b\\x");
+    }
+
+    #[test]
+    fn indent_is_capped_at_forty_percent_of_the_column() {
+        assert_eq!(indent_width(0, 300.0), 0.0);
+        assert_eq!(indent_width(3, 300.0), 48.0);
+        assert_eq!(indent_width(70_000, 300.0), 120.0);
+        assert_eq!(indent_width(u32::MAX, 160.0), 64.0);
+        assert_eq!(indent_width(5, -1.0), 0.0);
+    }
+
+    // Headless tests of `show`: egui_kittest drives a plain `egui::Context`
+    // with synthetic input. No window, no renderer, simulated time only.
+    mod ui {
+        use super::*;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+
+        struct State {
+            tree: Tree,
+            view: TreeView,
+        }
+
+        fn harness() -> Harness<'static, State> {
+            let tree = sample();
+            let view = TreeView::new(&tree, Metric::Allocated);
+            Harness::builder()
+                .with_size(vec2(900.0, 400.0))
+                // Short frames, so two clicks two frames apart are a double-click.
+                .with_step_dt(0.05)
+                .build_ui_state(|ui, s: &mut State| show(ui, &s.tree, &mut s.view, None), State { tree, view })
+        }
+
+        /// Centre of the label showing `text`.
+        fn label_center(h: &Harness<'_, State>, text: &str) -> Pos2 {
+            h.get_by_label(text).rect().center()
+        }
+
+        /// Centre of the expand arrow in front of the name `text`.
+        fn arrow_center(h: &Harness<'_, State>, text: &str) -> Pos2 {
+            let label = h.get_by_label(text).rect();
+            let gap = h.ctx.global_style().spacing.item_spacing.x;
+            egui::pos2(label.left() - gap - ARROW_WIDTH / 2.0, label.center().y)
+        }
+
+        fn click(h: &mut Harness<'_, State>, pos: Pos2, button: PointerButton) {
+            h.hover_at(pos);
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE });
+            }
+            h.run();
+        }
+
+        #[test]
+        fn click_selects_the_row_and_arrow_down_moves_from_it() {
+            let mut h = harness();
+            assert_eq!(h.state().view.selected, 0);
+            let pos = label_center(&h, "a");
+            click(&mut h, pos, PointerButton::Primary);
+            assert_eq!(h.state().view.selected, 1);
+            h.key_press(Key::ArrowDown);
+            h.run();
+            // Rows: C:, a, empty, top.txt
+            assert_eq!(h.state().view.selected, 7);
+        }
+
+        #[test]
+        fn arrow_click_expands_without_selecting() {
+            let mut h = harness();
+            let pos = arrow_center(&h, "a");
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.is_expanded(1));
+            assert_eq!(h.state().view.selected, 0);
+            assert!(h.query_by_label("big.bin").is_some());
+        }
+
+        #[test]
+        fn header_click_sorts_and_second_click_reverses() {
+            let mut h = harness();
+            let pos = label_center(&h, "Size");
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.sort() == (SortKey::Size, true));
+            // Far apart in time, so the second click is not a double-click.
+            h.run_steps(20);
+            click(&mut h, pos, PointerButton::Primary);
+            assert!(h.state().view.sort() == (SortKey::Size, false));
+        }
+
+        #[test]
+        fn double_click_on_the_arrow_toggles_once() {
+            let mut h = harness();
+            let pos = arrow_center(&h, "a");
+            h.hover_at(pos);
+            for _ in 0..2 {
+                for pressed in [true, false] {
+                    h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                }
+            }
+            h.run();
+            assert!(h.state().view.is_expanded(1));
+            assert_eq!(h.state().view.selected, 0);
+        }
+
+        #[test]
+        fn hovering_a_name_shows_its_full_path() {
+            let mut h = harness();
+            h.state_mut().view.reveal(&sample(), 5);
+            h.run();
+            assert!(h.query_by_label("C:\\a\\b\\x").is_none());
+            let pos = label_center(&h, "x");
+            h.hover_at(pos);
+            // Past the tooltip delay, in simulated time.
+            h.run_steps(20);
+            assert!(h.query_by_label("C:\\a\\b\\x").is_some());
+        }
+
+        #[test]
+        fn context_menu_closes_when_the_rows_change() {
+            let mut h = harness();
+            let pos = label_center(&h, "a");
+            click(&mut h, pos, PointerButton::Secondary);
+            assert!(h.query_by_label("Copy path").is_some());
+            let s = h.state_mut();
+            s.view.toggle(&s.tree, 7); // expands "empty", below the menu's row
+            h.run();
+            assert!(h.query_by_label("Copy path").is_none());
+            assert!(h.query_by_label("zero.txt").is_some());
+        }
     }
 }

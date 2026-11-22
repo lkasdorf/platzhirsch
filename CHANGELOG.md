@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supported" instead of an unclear read error.
 - The check for online-only cloud folders now looks at every folder on the path of the
   scan target, not only at the chosen folder.
+- Names of deeply nested entries stay readable in the folder table: the indentation takes
+  at most 40 % of the Name column. Hovering a name shows the entry's full path.
+- A double-click on the expand arrow of a folder expands or collapses it once instead of
+  twice.
+- In very deep folder trees (more than 65,535 levels), the left arrow key now selects the
+  real parent folder.
 
 ## [0.1.0] - 2026-11-22
 
