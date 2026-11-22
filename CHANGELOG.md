@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-22
+
+First release.
+
 ### Added
 
 - Fast scan for NTFS drives: reads the Master File Table directly, which needs
-  administrator rights. Measured on 2026-11-21: drive C: with 1.87 million entries in
-  2.1 s, 0.36 % deviation from the drive's used space.
+  administrator rights. Measured on an NVMe drive with 1.87 million entries: 2.1 s and
+  3.4 s in two runs, 0.36 % deviation from the drive's used space.
 - Fallback scan without administrator rights: parallel folder walk for single folders,
   network paths and non-NTFS drives. "Allocated" is an approximation in this mode.
 - In-memory folder tree with totals per folder for size, allocated space, file count,
@@ -58,3 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platzhirsch.exe` is kept as a build artifact.
 - Release workflow: pushing a tag `vX.Y.Z` builds on Windows and attaches
   `platzhirsch.exe` with its SHA-256 checksum to the GitHub release.
+
+[Unreleased]: https://github.com/lkasdorf/platzhirsch/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/lkasdorf/platzhirsch/releases/tag/v0.1.0

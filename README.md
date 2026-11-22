@@ -1,22 +1,27 @@
 # Platzhirsch
 
-[![CI](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml/badge.svg?branch=v1)](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml)
+[![CI](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lkasdorf/platzhirsch/actions/workflows/ci.yml)
 
 A fast disk space analyzer for Windows. It shows which folders use how much space, as a
 folder tree with sizes and as a treemap.
 
 Platzhirsch reads the NTFS Master File Table directly instead of asking Windows for every
 folder one by one. On the development machine, a full scan of an NVMe drive with
-1.87 million entries takes 2.1 seconds.
+1.87 million entries takes two to three and a half seconds.
 
 ![Platzhirsch main window: the folder table above, the treemap below](docs/screenshot.png)
 
 *A folder scan of `C:\Windows` without administrator rights.*
 
-> **Status:** in development. Version 0.1.0 is being built on the `v1` branch and has not
-> been released yet. The scanners are finished and measured, and the user interface for
-> 0.1.0 is complete: a folder table with a treemap below it. See the
-> [changelog](CHANGELOG.md) for what exists today.
+## Download
+
+Version 0.1.0 is the first release. Get `platzhirsch.exe` from the
+[releases page](https://github.com/lkasdorf/platzhirsch/releases/latest). It is a single
+file: no installer, nothing else to install. Each release lists the SHA-256 checksum of
+the file. The executable is not code-signed, so Windows SmartScreen may warn on the first
+start.
+
+See the [changelog](CHANGELOG.md) for what each version contains.
 
 ## What it does
 
@@ -50,11 +55,11 @@ dependencies. They are tripwires against an accidental change, not a proof.
 
 ## Measured
 
-Taken on 2026-11-21 with the diagnostic program `bench`:
+Taken on 2026-11-21 and 2026-11-22 with the diagnostic program `bench`:
 
 | | Result |
 |---|---|
-| Fast scan, NVMe drive, 1.87 million entries | 2.1 s |
+| Fast scan, NVMe drive, 1.87 million entries | 2.1 s and 3.4 s in two runs |
 | Deviation of "allocated" from the drive's used space | 0.36 % |
 | Memory after the scan | 147 MB |
 | Peak memory during the scan | 246 MB |
