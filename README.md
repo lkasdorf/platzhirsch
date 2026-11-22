@@ -7,7 +7,7 @@ folder tree with sizes and as a treemap.
 
 Platzhirsch reads the NTFS Master File Table directly instead of asking Windows for every
 folder one by one. On the development machine, a full scan of an NVMe drive with
-1.87 million entries takes two to three and a half seconds.
+1.88 million entries takes one to two and a half seconds.
 
 ![Platzhirsch main window: the folder table above, the treemap below](docs/screenshot.png)
 
@@ -57,15 +57,15 @@ dependencies. They are tripwires against an accidental change, not a proof.
 
 ## Measured
 
-Taken on 2026-11-21 and 2026-11-22 with the diagnostic program `bench`:
+Taken on 2026-11-22 with the diagnostic program `bench` of version 0.2.0:
 
 | | Result |
 |---|---|
-| Fast scan, NVMe drive, 1.87 million entries | 2.1 s and 3.4 s in two runs |
-| Deviation of "allocated" from the drive's used space | 0.36 % |
-| Memory after the scan | 147 MB |
-| Peak memory during the scan | 246 MB |
-| Fallback scan of the same drive, without administrator rights | 42 s |
+| Fast scan, NVMe drive, 1.88 million entries | 2.3 s and 1.2 s in two runs |
+| Deviation of "allocated" from the drive's used space | 0.23 % |
+| Memory after the scan | 150 MB |
+| Peak memory during the scan | 249 MB |
+| Fallback scan of the same drive, without administrator rights | 34 s |
 
 For a folder with 141,418 files, the fast scan and the fallback scan report the same
 file count and the same size.
@@ -142,6 +142,8 @@ The design document and the implementation plan are in
   whose parent cannot be listed. When the path goes through a link, Windows resolves the
   link before the folders behind it can be checked, so a link that points into an
   online-only folder can still make the provider fetch that folder's entry.
+- A symbolic link that was created as a file link but points to a folder is refused as a
+  scan target with "Not a folder". Windows does not resolve such a link either.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
 - Screen readers get the names of all controls and of each table row through the Windows

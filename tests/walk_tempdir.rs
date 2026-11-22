@@ -101,17 +101,33 @@ fn junction_root_is_scanned_as_its_target() {
 }
 
 #[test]
-fn symbolic_link_roots_are_scanned_as_their_target() {
+fn symbolic_link_root_is_scanned_as_its_target() {
     let tmp = tempfile::tempdir().unwrap();
     let target = link_target(tmp.path());
-    // A directory symbolic link, and a file-type one that points to a folder.
-    for (kind, name) in [(Some("/D"), "dirlink"), (None, "filelink")] {
-        let link = tmp.path().join(name);
-        if !mklink(kind, &link, &target) {
-            eprintln!("skipped {name}: this environment may not create symbolic links");
-            continue;
-        }
-        assert_scanned_as_target(&link);
+    let link = tmp.path().join("dirlink");
+    if !mklink(Some("/D"), &link, &target) {
+        eprintln!("skipped dirlink: this environment may not create symbolic links");
+        return;
+    }
+    assert_scanned_as_target(&link);
+}
+
+/// Windows does not resolve a symbolic link that was created as a file link
+/// but points to a folder (seen on the build server: the open that follows
+/// the link fails). Such a root is refused like a file, and nothing is listed.
+#[test]
+fn file_link_to_a_folder_is_refused_as_not_a_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = link_target(tmp.path());
+    let link = tmp.path().join("filelink");
+    if !mklink(None, &link, &target) {
+        eprintln!("skipped filelink: this environment may not create symbolic links");
+        return;
+    }
+    match scan_walk(&link, &Progress::default()) {
+        Err(ScanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory, "{e}"),
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => panic!("a file link to a folder was scanned"),
     }
 }
 

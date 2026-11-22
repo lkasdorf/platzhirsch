@@ -547,8 +547,9 @@ fn plan_root(given: Vec<u16>, first: LevelCheck, resolved: Option<Vec<u16>>) -> 
 /// access only, following links; `None` if that or the query fails.
 fn final_path(path: &[u16]) -> Option<Vec<u16>> {
     // No data access is requested, so no file content is read and no
-    // placeholder is hydrated. Without FILE_DIRECTORY_FILE, a file-type
-    // symbolic link that points to a folder can be opened as well.
+    // placeholder is hydrated. A symbolic link created as a file link that
+    // points to a folder is not resolved by Windows: this open fails, the
+    // path stays as given and the scan ends with "Not a folder".
     let handle = nt_open(
         path,
         FILE_READ_ATTRIBUTES | SYNCHRONIZE,

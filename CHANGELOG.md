@@ -75,9 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scan ends with an error instead of ending the program.
 - A Master File Table that is recorded as lying outside the drive is rejected as damaged
   instead of being read.
-- A link to a folder is scanned as the folder it points to. This now also holds for a
-  link that was created as a file-type link (not yet run on a machine that can create
-  such links).
+- A junction or directory symbolic link chosen as the scan target is scanned as the folder
+  it points to, also when the link sits higher up in the path.
 - Device paths such as `\\.\C:` are refused with the message "Device paths are not
   supported" instead of an unclear read error.
 - The check for online-only cloud folders now looks at every folder on the path of the
