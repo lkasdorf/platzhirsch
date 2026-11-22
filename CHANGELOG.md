@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New keys in the folder table: Enter expands or collapses the selected folder, the Menu
   key or Shift+F10 opens its context menu, and Ctrl+C copies its path. Tab reaches the
   table and the column headers, which sort with Space or Enter.
+- `platzhirsch.exe` carries the app's icon and version information, so Explorer shows the
+  pie icon and the Details tab lists product name, description, version and copyright.
 
 ### Changed
 

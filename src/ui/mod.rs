@@ -428,18 +428,22 @@ impl Drop for App {
     }
 }
 
-/// A simple pie-chart icon (a share of a disk), drawn in code.
-fn window_icon() -> egui::IconData {
-    const N: u32 = 32;
-    let center = (N as f32 - 1.0) / 2.0;
-    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
-    for y in 0..N {
-        for x in 0..N {
+/// The app icon, a simple pie chart (a share of a disk), drawn in code: `size` x `size`
+/// pixels as RGBA, rows top to bottom. The window icon and `assets/platzhirsch.ico`
+/// (embedded in the executable, see `tests/icon_file.rs`) both come from here.
+pub fn icon_rgba(size: u32) -> Vec<u8> {
+    // Drawn for 32 pixels; other sizes scale the radii.
+    let scale = size as f32 / 32.0;
+    let (outer, ring) = (15.0 * scale, 13.5 * scale);
+    let center = (size as f32 - 1.0) / 2.0;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
             let (dx, dy) = (x as f32 - center, y as f32 - center);
             let r = (dx * dx + dy * dy).sqrt();
-            let pixel = if r > 15.0 {
+            let pixel = if r > outer {
                 [0, 0, 0, 0]
-            } else if r > 13.5 {
+            } else if r > ring {
                 [30, 60, 90, 255]
             } else if dx >= 0.0 && dy <= 0.0 {
                 [240, 170, 50, 255]
@@ -449,7 +453,12 @@ fn window_icon() -> egui::IconData {
             rgba.extend_from_slice(&pixel);
         }
     }
-    egui::IconData { rgba, width: N, height: N }
+    rgba
+}
+
+fn window_icon() -> egui::IconData {
+    const N: u32 = 32;
+    egui::IconData { rgba: icon_rgba(N), width: N, height: N }
 }
 
 /// Opens the main window. With `initial`, its scan starts right away.
