@@ -31,7 +31,7 @@ mod tests {
         assert!(matches!(parse_args(&["--scan".into(), "C:".into()]), Some(ScanTarget::Volume('C'))));
         assert!(matches!(parse_args(&["--scan".into(), "c:\\".into()]), Some(ScanTarget::Volume('C'))));
         assert!(matches!(parse_args(&["--scan".into(), "c:/".into()]), Some(ScanTarget::Volume('C'))));
-        assert!(matches!(parse_args(&["--scan".into(), "C:\\DRIVE".into()]), Some(ScanTarget::Folder(_))));
+        assert!(matches!(parse_args(&["--scan".into(), "C:\\Data".into()]), Some(ScanTarget::Folder(_))));
         assert!(parse_args(&[]).is_none());
     }
 
