@@ -434,7 +434,7 @@ pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str) -> Meth
 - [ ] **Step 1: Write tests**
 
 ```rust
-let vol = ScanTarget::Volume('C'); let dir = ScanTarget::Folder("C:\\DRIVE".into());
+let vol = ScanTarget::Volume('C'); let dir = ScanTarget::Folder("C:\\Data".into());
 assert_eq!(choose_method(&vol, true,  "NTFS"),  MethodChoice::Mft);
 assert_eq!(choose_method(&vol, false, "NTFS"),  MethodChoice::AskElevation);
 assert_eq!(choose_method(&vol, true,  "exFAT"), MethodChoice::Walk);
@@ -602,7 +602,7 @@ Status bar, parts separated by ` | `: `Free: {free} of {total}` (drive only), `{
 ```rust
 assert!(matches!(parse_args(&["--scan".into(), "C:".into()]), Some(ScanTarget::Volume('C'))));
 assert!(matches!(parse_args(&["--scan".into(), "c:\\".into()]), Some(ScanTarget::Volume('C'))));
-assert!(matches!(parse_args(&["--scan".into(), "C:\\DRIVE".into()]), Some(ScanTarget::Folder(_))));
+assert!(matches!(parse_args(&["--scan".into(), "C:\\Data".into()]), Some(ScanTarget::Folder(_))));
 assert!(parse_args(&[]).is_none());
 // status_text: MFT, 4.2 s, 1_683_667 files, skipped 3, volume free 1_407_374_883_553 of 4_090_260_848_640
 assert_eq!(s, "Free: 1.3 TB of 3.7 TB | 1,683,667 files | MFT scan, 4.2 s | 3 skipped");

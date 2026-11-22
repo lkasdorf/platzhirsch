@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn method_choice() {
         let vol = ScanTarget::Volume('C');
-        let dir = ScanTarget::Folder("C:\\DRIVE".into());
+        let dir = ScanTarget::Folder("C:\\Data".into());
         assert_eq!(choose_method(&vol, true, "NTFS"), MethodChoice::Mft);
         assert_eq!(choose_method(&vol, false, "NTFS"), MethodChoice::AskElevation);
         assert_eq!(choose_method(&vol, true, "exFAT"), MethodChoice::Walk);
@@ -167,10 +167,10 @@ mod tests {
             assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
         }
         for folder in [
-            r"C:\DRIVE",
+            r"C:\Data",
             r"C:\\",
             r"\\nas\share",
-            r"\\?\C:\DRIVE",
+            r"\\?\C:\Data",
             r"\\?\UNC\server\share",
             r"\\?\\C:\",
             "1:",
