@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scan has stopped, which can take a moment on a network share.
 - When the restart with administrator rights is declined or fails, the elevation notice
   says "Administrator rights were not granted."
+- A click on the name strip at the top of the treemap goes up to the parent of the folder
+  shown, whose tooltip then says "Click to go up". At the drive or folder scanned there is
+  no parent and the strip does nothing.
 
 ### Changed
 
@@ -22,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ended unexpectedly.", instead of closing the program.
 - The copy started with administrator rights uses the same working folder as the first
   one when that folder is on a local fixed drive.
+- Folders in the treemap whose content is too small to draw are shown in a darker shade;
+  their tooltip says how many entries are inside.
+- Hovering in the treemap lightens only what is under the pointer: over a folder its name
+  strip, over a file its tile.
 
 ### Fixed
 
@@ -54,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   twice.
 - In very deep folder trees (more than 65,535 levels), the left arrow key now selects the
   real parent folder.
+- Hovering and resizing the treemap stay smooth on large drives with tens of thousands of
+  tiles: the tiles are drawn as one prepared shape instead of one by one each frame, and
+  while the treemap is resized the last layout is stretched to fit and laid out anew only
+  when the size has stayed the same for 150 ms.
 
 ## [0.1.0] - 2026-11-22
 

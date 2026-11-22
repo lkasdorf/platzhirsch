@@ -38,8 +38,10 @@ See the [changelog](CHANGELOG.md) for what each version contains.
   navigation, and "Show in Explorer" / "Copy path" on right-click. Only the visible rows
   are drawn.
 - **Treemap** of the folder selected in the table, coloured by level. Hover for path and
-  size, click a tile to select it in the table. The divider can be dragged and the
-  treemap can be hidden.
+  size, click a tile to select it in the table, click the name strip at the top to go up
+  one folder (when the treemap is too small for that strip, use the table). Folders whose
+  content is too small to draw are darker. The divider can be dragged and the treemap can
+  be hidden.
 - **A single .exe**, no installer, no runtime to install.
 
 ## What it never does

@@ -48,7 +48,8 @@ pub enum Phase {
         result: Arc<ScanResult>,
         view: TreeView,
         /// Belongs to this result only: a new scan starts with an empty cache.
-        treemap: TreemapCache,
+        /// Boxed: with its mesh and resize state it is the largest field.
+        treemap: Box<TreemapCache>,
         /// Re-read after the scan when the target was a volume.
         volume: Option<VolumeInfo>,
     },
@@ -272,7 +273,7 @@ impl App {
             NextPhase::Idle => Phase::Idle,
             NextPhase::Done(result, info) => {
                 let view = TreeView::new(&result.tree, self.metric);
-                Phase::Done { result: Arc::new(*result), view, treemap: TreemapCache::default(), volume: info }
+                Phase::Done { result: Arc::new(*result), view, treemap: Box::default(), volume: info }
             }
             NextPhase::Failed { message, offer_walk } => Phase::Failed { message, offer_walk },
         };
@@ -389,7 +390,7 @@ impl App {
                         .min_size(TREEMAP_MIN_HEIGHT)
                         .max_size((ui.available_height() - TABLE_MIN_HEIGHT).max(TREEMAP_MIN_HEIGHT))
                         .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 4, ..egui::Margin::ZERO }))
-                        .show(ui, |ui| treemap_view::show(ui, tree, view, treemap))
+                        .show(ui, |ui| treemap_view::show(ui, tree, view, treemap, now))
                         .inner;
                     if let Some(node) = clicked {
                         scroll_to = Some(view.reveal(tree, node));
@@ -498,7 +499,7 @@ mod tests {
     fn done_phase() -> Phase {
         let result = result();
         let view = TreeView::new(&result.tree, Metric::Allocated);
-        Phase::Done { result: Arc::new(result), view, treemap: TreemapCache::default(), volume: None }
+        Phase::Done { result: Arc::new(result), view, treemap: Box::default(), volume: None }
     }
 
     const C: ScanTarget = ScanTarget::Volume('C');
