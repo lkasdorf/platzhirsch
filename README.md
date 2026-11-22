@@ -15,7 +15,7 @@ folder one by one. On the development machine, a full scan of an NVMe drive with
 
 ## Download
 
-Version 0.1.0 is the first release. Get `platzhirsch.exe` from the
+Get the latest `platzhirsch.exe` from the
 [releases page](https://github.com/lkasdorf/platzhirsch/releases/latest). It is a single
 file: no installer, nothing else to install. Each release lists the SHA-256 checksum of
 the file. The executable is not code-signed, so Windows SmartScreen may warn on the first
@@ -72,7 +72,9 @@ file count and the same size.
 
 ## Build
 
-You need Windows 10 or 11 (x64) and Rust 1.95 or newer with the MSVC target.
+You need Windows 10 or 11 (x64), Rust 1.95 or newer with the MSVC target, and the
+Windows SDK: its resource compiler `rc.exe` embeds the icon and the version information.
+The Visual Studio Build Tools that the MSVC target needs normally include it.
 
 ```powershell
 cargo build --release
@@ -135,12 +137,11 @@ The design document and the implementation plan are in
   and the space folders need for their own index is not counted. This is why the
   allocated total of a drive is slightly below its used space.
 - A cloud folder that is not on this machine is refused as a scan target. The check
-  looks at every folder on the path to the chosen folder. It stops at the first folder
+  looks at every folder on the path to the chosen folder, and for a `subst` drive or a
+  mapped network drive also at the path the drive points to. It stops at the first folder
   whose parent cannot be listed. When the path goes through a link, Windows resolves the
   link before the folders behind it can be checked, so a link that points into an
   online-only folder can still make the provider fetch that folder's entry.
-- The drive list is read again each time it is opened, so a drive plugged in later
-  appears there.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
 - Screen readers get the names of all controls and of each table row through the Windows

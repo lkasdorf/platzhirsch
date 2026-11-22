@@ -731,7 +731,7 @@ fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Re
                     break 'listings Err(names_too_long());
                 }
                 name_bytes += e.name.len();
-                let link =e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
+                let link = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
                 if e.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                     b.push(&e.name, job.dir, e.size, e.allocated, e.mtime, if link { F_LINK } else { 0 });
                     continue;
