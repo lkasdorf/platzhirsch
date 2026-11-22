@@ -39,7 +39,20 @@ pub(super) fn scanning_text(elapsed: Duration) -> String {
     format!("Scanning{}", ".".repeat(dots))
 }
 
-/// What a running scan shows: `Cancelling…` once Cancel was pressed, else the dots.
+/// The `Scanning` text, always as wide as its form with three dots, so that what
+/// follows it in the row does not move when the dots change.
+fn scanning_label(ui: &mut egui::Ui, elapsed: Duration) {
+    let widest = egui::WidgetText::from(scanning_text(2 * SCAN_REPAINT))
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+        .size();
+    let layout = egui::Layout::left_to_right(egui::Align::Center);
+    ui.allocate_ui_with_layout(widest, layout, |ui| {
+        ui.set_min_width(widest.x);
+        ui.label(scanning_text(elapsed));
+    });
+}
+
+/// What a running scan shows:`Cancelling…` once Cancel was pressed, else the dots.
 pub(super) fn scan_indicator(progress: &Progress, elapsed: Duration) -> String {
     if progress.cancel.load(Ordering::Relaxed) {
         CANCELLING.to_string()
@@ -154,7 +167,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App, now: Instant) -> Option<
                         ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).show_percentage());
                     }
                     ScanMethod::Walk => {
-                        ui.label(scanning_text(elapsed));
+                        scanning_label(ui, elapsed);
                         ui.label(format!("{} entries found", format_count(done)));
                     }
                 }
@@ -251,7 +264,8 @@ mod tests {
         assert_eq!(text(250), "Scanning..");
         assert_eq!(text(500), "Scanning...");
         assert_eq!(text(750), "Scanning.");
-        assert_eq!(text(u64::MAX), scanning_text(Duration::from_millis(u64::MAX)));
+        // u64::MAX / 250 = 73,786,976,294,958,206, which leaves 2 when divided by 3.
+        assert_eq!(text(u64::MAX), "Scanning...");
     }
 
     #[test]
@@ -371,6 +385,18 @@ mod tests {
             h.get_by_label("Scan slowly").click();
             h.run();
             assert!(matches!(h.state().last, Some(Action::SlowScan(ScanTarget::Volume('D')))));
+        }
+
+        #[test]
+        fn dots_do_not_move_the_count_beside_them() {
+            let count_left = |elapsed_ms| {
+                let mut h = scanning(elapsed_ms);
+                h.run();
+                h.get_by_label("0 entries found").rect().left()
+            };
+            let (one, two, three) = (count_left(0), count_left(250), count_left(500));
+            assert_eq!(one, three);
+            assert_eq!(two, three);
         }
 
         #[test]

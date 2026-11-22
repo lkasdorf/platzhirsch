@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unexpected fault inside a scan now ends only that scan, with the message "The scan
   ended unexpectedly.", instead of closing the program.
 - The copy started with administrator rights uses the same working folder as the first
-  one.
+  one when that folder is on a local fixed drive.
 
 ### Fixed
 
@@ -29,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start appears without a restart.
 - The window no longer redraws continuously while a scan runs; the progress indicator is
   a text that changes four times a second.
-
 - Sizes just below a unit boundary are shown in the next unit, so 1,048,575 Bytes reads
   `1.0 MB` instead of `1,024.0 KB`.
 - Read errors are shown in English, with the cause and the Windows error code, instead of

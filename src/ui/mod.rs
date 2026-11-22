@@ -119,6 +119,12 @@ fn volume_letter(target: &ScanTarget) -> Option<char> {
     }
 }
 
+/// The text in the middle of an idle window. None under the elevation hint: the user
+/// has just pressed Scan, and the hint row says what to do next.
+fn idle_text(hint: Option<ElevationHint>) -> Option<&'static str> {
+    hint.is_none().then_some(IDLE_HINT)
+}
+
 fn same_target(a: &ScanTarget, b: &ScanTarget) -> bool {
     match (a, b) {
         (ScanTarget::Volume(x), ScanTarget::Volume(y)) => x == y,
@@ -361,9 +367,12 @@ impl App {
     /// the treemap below it.
     fn central_area(&mut self, ui: &mut egui::Ui, now: Instant) {
         let show_treemap = self.show_treemap;
+        let hint = self.hint;
         match &mut self.phase {
             Phase::Idle => {
-                ui.centered_and_justified(|ui| ui.label(IDLE_HINT));
+                if let Some(text) = idle_text(hint) {
+                    ui.centered_and_justified(|ui| ui.label(text));
+                }
             }
             Phase::Scanning { progress, started, .. } => {
                 let text = bars::scan_indicator(progress, now.saturating_duration_since(*started));
@@ -691,6 +700,12 @@ mod tests {
         let _ = tx.send((Ok(result()), None));
         app.poll_scan(&ctx);
         assert!(matches!(app.phase, Phase::Idle));
+    }
+
+    #[test]
+    fn no_idle_text_under_the_elevation_hint() {
+        assert_eq!(idle_text(None), Some("Choose a drive and press \"Scan\"."));
+        assert_eq!(idle_text(hint('C')), None);
     }
 
     #[test]

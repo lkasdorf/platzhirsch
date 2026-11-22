@@ -171,13 +171,35 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
+/// The working directory to give the elevated copy: `dir` only when it lies on a local
+/// fixed drive (`drive_type` gives the type of a drive letter's root). A mapped network
+/// drive is usually not visible to the elevated process, and a removable drive or a UNC
+/// path may not be there either; then no directory is passed and Windows picks one.
+fn elevation_dir(dir: &std::path::Path, drive_type: impl FnOnce(char) -> u32) -> Option<&std::path::Path> {
+    use std::path::{Component, Prefix};
+    let letter = match dir.components().next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => char::from(l),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (drive_type(letter) == DRIVE_FIXED).then_some(dir)
+}
+
+/// The type of drive `letter`'s root (`DRIVE_FIXED`, `DRIVE_REMOTE`, ...).
+fn drive_type(letter: char) -> u32 {
+    // SAFETY: `root` is a valid, NUL-terminated wide string that outlives the call.
+    drive_root(letter).map_or(0, |root| unsafe { GetDriveTypeW(&root) })
+}
+
 /// Starts this program again with admin rights (UAC prompt), in the current working
-/// directory. `Err` if declined or failed.
+/// directory if that lies on a local fixed drive. `Err` if declined or failed.
 pub fn relaunch_elevated(args: &[String]) -> std::io::Result<()> {
     let exe = HSTRING::from(std::env::current_exe()?.as_os_str());
     let params = HSTRING::from(args.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" "));
-    // Without a readable working directory Windows picks one, as before.
-    let dir = std::env::current_dir().ok().map(|d| HSTRING::from(d.as_os_str()));
+    let cwd = std::env::current_dir().ok();
+    let dir = cwd.as_deref().and_then(|d| elevation_dir(d, drive_type)).map(|d| HSTRING::from(d.as_os_str()));
     let dir_ptr = dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
     // SAFETY: all strings are NUL-terminated and outlive the call (`dir` lives until the end
     // of the function); no window handle is passed.
@@ -299,6 +321,25 @@ impl VolumeReader for RawVolume {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevated_copy_gets_only_a_local_fixed_working_dir() {
+        use std::path::Path;
+        use windows::Win32::System::WindowsProgramming::{DRIVE_CDROM, DRIVE_REMOTE, DRIVE_UNKNOWN};
+        let fixed = |_| DRIVE_FIXED;
+        assert_eq!(elevation_dir(Path::new(r"C:\Users\x"), fixed), Some(Path::new(r"C:\Users\x")));
+        assert_eq!(elevation_dir(Path::new(r"\\?\D:\work"), fixed), Some(Path::new(r"\\?\D:\work")));
+        for other in [DRIVE_REMOTE, DRIVE_REMOVABLE, DRIVE_CDROM, DRIVE_UNKNOWN] {
+            assert_eq!(elevation_dir(Path::new(r"Z:\share"), |_| other), None, "{other}");
+        }
+        // A UNC path has no drive letter to ask about.
+        for unc in [r"\\nas\share\x", r"\\?\UNC\nas\share"] {
+            assert_eq!(elevation_dir(Path::new(unc), fixed), None, "{unc}");
+        }
+        // The letter of the path is the one asked about.
+        let only_e_fixed = |l| if l == 'E' { DRIVE_FIXED } else { DRIVE_REMOTE };
+        assert_eq!(elevation_dir(Path::new(r"E:\x"), only_e_fixed), Some(Path::new(r"E:\x")));
+    }
 
     #[test]
     fn system_drive_is_listed_as_ntfs() {
