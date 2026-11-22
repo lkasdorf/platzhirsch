@@ -13,8 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1.0 MB` instead of `1,024.0 KB`.
 - Read errors are shown in English, with the cause and the Windows error code, instead of
   in the language of the system.
-- The fast scan also works on drives whose Master File Table is described out of order
-  or sits on sectors larger than 4 KB; such drives were rejected before.
+- Drives whose Master File Table extents are recorded out of order, or with sectors larger
+  than 4 KB, are no longer rejected (tested on synthetic images).
+- Stale records beyond the initialized part of the Master File Table no longer appear as
+  entries (tested on synthetic images).
+- Entries whose reparse data is stored outside their file record can now be marked as
+  links (tested on synthetic images).
+- Running out of memory while reading a very large Master File Table is reported as an
+  error instead of ending the program.
 
 ## [0.1.0] - 2026-11-22
 

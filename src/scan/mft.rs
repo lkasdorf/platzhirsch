@@ -81,12 +81,17 @@ struct MftMap {
 }
 
 impl MftMap {
-    fn push(&mut self, run: Run, cluster: u64) -> Result<(), ScanError> {
+    /// Appends one run. It must lie inside the volume (`volume_bytes`), which
+    /// also bounds the record count before the slot table is reserved.
+    fn push(&mut self, run: Run, cluster: u64, volume_bytes: u64) -> Result<(), ScanError> {
         let lcn = run.lcn.ok_or(malformed("sparse run inside the MFT"))?;
         let overflow = || malformed("MFT run out of range");
         let vol_start = lcn.checked_mul(cluster).ok_or_else(overflow)?;
         let len = run.clusters.checked_mul(cluster).ok_or_else(overflow)?;
-        vol_start.checked_add(len).ok_or_else(overflow)?;
+        let vol_end = vol_start.checked_add(len).ok_or_else(overflow)?;
+        if vol_end > volume_bytes {
+            return Err(malformed("MFT run outside the volume"));
+        }
         self.clusters = self.clusters.checked_add(run.clusters).ok_or_else(overflow)?;
         let mft_start = self.end;
         self.end = self.end.checked_add(len).ok_or_else(overflow)?;
@@ -101,7 +106,12 @@ impl MftMap {
     /// Sorted by start VCN they must follow each other without gap or
     /// overlap. With `prefix_only`, the map ends quietly at the first gap:
     /// that is the part of the MFT that can already be read.
-    fn from_pieces(pieces: &[(u64, Vec<Run>)], cluster: u64, prefix_only: bool) -> Result<Self, ScanError> {
+    fn from_pieces(
+        pieces: &[(u64, Vec<Run>)],
+        cluster: u64,
+        volume_bytes: u64,
+        prefix_only: bool,
+    ) -> Result<Self, ScanError> {
         let mut order: Vec<&(u64, Vec<Run>)> = pieces.iter().collect();
         order.sort_by_key(|p| p.0);
         let mut map = MftMap::default();
@@ -113,7 +123,7 @@ impl MftMap {
                 return Err(malformed("MFT extents overlap or leave a gap"));
             }
             for run in runs {
-                map.push(*run, cluster)?;
+                map.push(*run, cluster, volume_bytes)?;
             }
         }
         Ok(map)
@@ -218,7 +228,14 @@ fn locate_map<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<Located, 
     apply_fixups(&mut rec, FIXUP_BLOCK_SIZE).map_err(ScanError::Ntfs)?;
     let info = parse_record(&rec, 0, true).map_err(ScanError::Ntfs)?;
     let data_len = info.size.ok_or(malformed("$MFT has no unnamed $DATA"))?;
-    let byte_len = info.initialized.map_or(data_len, |init| init.min(data_len));
+    // The initialized size bounds the MFT only if it covers at least the
+    // root record (record 5); a smaller value is taken as damage, not as an
+    // MFT without a root, and the data size is used instead.
+    let min_initialized = (ROOT_RECORD as u64 + 1) * u64::from(boot.record_size);
+    let byte_len = match info.initialized {
+        Some(init) if init >= min_initialized => init.min(data_len),
+        _ => data_len,
+    };
 
     // Every piece (start VCN, runs) of the unnamed $DATA, in the order found.
     let mut pieces = info.data_runs;
@@ -240,7 +257,7 @@ fn locate_map<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<Located, 
         // reach it; every round reads at least one record or stops.
         let rs = u64::from(boot.record_size);
         while !pending.is_empty() {
-            let known = MftMap::from_pieces(&pieces, cluster, true)?;
+            let known = MftMap::from_pieces(&pieces, cluster, volume_bytes, true)?;
             let (ready, later): (Vec<u64>, Vec<u64>) = pending.iter().partition(|&&no| known.holds(no, rs));
             if ready.is_empty() {
                 return Err(malformed("attribute list points outside the known MFT"));
@@ -251,7 +268,7 @@ fn locate_map<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<Located, 
             pending = later;
         }
     }
-    let map = MftMap::from_pieces(&pieces, cluster, false)?;
+    let map = MftMap::from_pieces(&pieces, cluster, volume_bytes, false)?;
 
     if map.end < byte_len {
         return Err(ScanError::MftIncomplete { found_bytes: map.end, expected_bytes: byte_len });
@@ -956,6 +973,78 @@ mod tests {
     }
 
     #[test]
+    fn mft_run_beyond_the_volume_is_malformed() {
+        // record 0 claims about 4e9 records of 1 KiB in a run far past the volume end
+        let huge: u64 = 0xFFFF_FFF0 * 1024;
+        let clusters = huge / 4096;
+        let mut runs = vec![0x14];
+        runs.extend_from_slice(&clusters.to_le_bytes()[..4]);
+        runs.push(0x04);
+        runs.push(0x00);
+        let mut v = fake_volume(
+            1024,
+            &[(4, 8)],
+            vec![
+                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &runs, huge, huge, 0, 0).build(512)),
+                (5, root_dir()),
+            ],
+        );
+        let boot = parse_boot_sector(&v.bytes[..512]).unwrap();
+        // the run itself is refused, not a failed reservation afterwards
+        let outside = ScanError::Ntfs(NtfsError::Malformed("MFT run outside the volume")).to_string();
+        assert_eq!(locate_mft(&mut v, &boot).err().map(|e| e.to_string()), Some(outside.clone()));
+        let r = scan_mft_from(&mut v, "C:", &Progress::default());
+        assert_eq!(r.err().map(|e| e.to_string()), Some(outside));
+    }
+
+    #[test]
+    fn tiny_initialized_size_falls_back_to_data_size() {
+        let mut v = fake_volume(
+            1024,
+            &[(4, 8)],
+            vec![
+                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .initialized(0).build(512)),
+                (5, root_dir()),
+                (20, RecordBuilder::new(1024).file_name(5, "a.txt", 1).data_resident("", 5).build(512)),
+            ],
+        );
+        let boot = parse_boot_sector(&v.bytes[..512]).unwrap();
+        assert_eq!(locate_mft(&mut v, &boot).unwrap().record_count, 32);
+        let r = scan_mft_from(&mut v, "C:", &Progress::default()).unwrap();
+        assert!(child(&r.tree, r.tree.root(), "a.txt").is_some());
+        assert_eq!(r.skipped, 0);
+    }
+
+    #[test]
+    fn mft_extension_record_is_merged_into_mft() {
+        // record 16 is an extension record of $MFT (reference: record 0, sequence 5)
+        // holding a named stream of 8192 allocated bytes
+        let with_ext = |ext: bool| {
+            let mut records = vec![
+                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                (5, root_dir()),
+            ];
+            if ext {
+                records.push((16, RecordBuilder::new(1024).base(0)
+                        .data_nonresident("extra", 0, RUNS, 8192, 8192, 0, 0).build(512)));
+            }
+            scan_mft_from(&mut fake_volume(1024, &[(4, 8)], records), "C:", &Progress::default()).unwrap()
+        };
+        let (without, with) = (with_ext(false), with_ext(true));
+        let mft = |r: &ScanResult| {
+            let t = &r.tree;
+            t.allocated(child(t, t.root(), "$MFT").expect("$MFT"))
+        };
+        assert_eq!(mft(&with), mft(&without) + 8192);
+        assert_eq!(with.tree.allocated(with.tree.root()), without.tree.allocated(without.tree.root()) + 8192);
+        assert_eq!(with.skipped, 0);
+    }
+
+    #[test]
     fn truncated_mft_is_error() {
         let mut v = fake_volume(
             1024,
@@ -1017,8 +1106,12 @@ mod tests {
                 "{total_sectors} sectors"
             );
         }
+        // The MFT must also end inside the volume: it ends at byte 49152 = sector 96.
         let mut v = image();
-        v.bytes[0x28..0x30].copy_from_slice(&33u64.to_le_bytes());
+        v.bytes[0x28..0x30].copy_from_slice(&95u64.to_le_bytes());
+        assert!(matches!(scan_mft_from(&mut v, "C:", &Progress::default()), Err(ScanError::Ntfs(NtfsError::Malformed(_)))));
+        let mut v = image();
+        v.bytes[0x28..0x30].copy_from_slice(&96u64.to_le_bytes());
         assert!(scan_mft_from(&mut v, "C:", &Progress::default()).is_ok());
     }
 
