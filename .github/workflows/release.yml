@@ -104,9 +104,6 @@ jobs:
       - name: Attach to the GitHub release
         run: |
           $ErrorActionPreference = 'Stop'
-          # Read gh's output as UTF-8; with the console's default code page, non-ASCII
-          # characters in existing release notes would be damaged when written back.
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           # No native-command preference here: a missing release is an expected non-zero exit.
           gh release view $env:TAG --json tagName *> $null
           if ($LASTEXITCODE -ne 0) {
@@ -117,7 +114,16 @@ jobs:
           # replace the files and bring the checksum in its notes up to date.
           gh release upload $env:TAG dist/platzhirsch.exe dist/platzhirsch.exe.sha256 --clobber
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $body = (@(gh release view $env:TAG --json body --jq .body) -join "`n").TrimEnd()
+          # Read gh's output as UTF-8; with the console's default code page, non-ASCII
+          # characters in the existing notes would be damaged when written back. If the
+          # encoding cannot be set, leave the notes alone rather than risk that.
+          try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          } catch {
+            Write-Warning "Could not switch the console to UTF-8; the release notes were left unchanged."
+            exit 0
+          }
+          $body =(@(gh release view $env:TAG --json body --jq .body) -join "`n").TrimEnd()
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # Only a line in the form this workflow writes (hash in backticks) is replaced;
           # notes without such a line get the Download section appended.
