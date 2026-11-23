@@ -163,9 +163,7 @@ fn compare(folder: &Path, out: Option<&str>) {
     let mt: &Tree = &mft.tree;
     let mut node = mt.root();
     for name in &names {
-        node = mt
-            .child_by_name(node, name)
-            .unwrap_or_else(|| fail("folder not found in MFT tree".to_string(), out));
+        node = mt.child_by_name(node, name).unwrap_or_else(|| fail("folder not found in MFT tree".to_string(), out));
     }
     let walk = scan_walk(folder, &Progress::default()).unwrap_or_else(|e| fail(e.to_string(), out));
     let wt = &walk.tree;
@@ -218,7 +216,10 @@ mod tests {
     fn a_failed_write_is_reported_in_english() {
         // What writing returns when the folder of the output file does not exist.
         let e = std::io::Error::from_raw_os_error(3);
-        assert_eq!(write_failure(r"X:\missing\out.txt", &e), r"error: could not write X:\missing\out.txt: not found (OS error 3)");
+        assert_eq!(
+            write_failure(r"X:\missing\out.txt", &e),
+            r"error: could not write X:\missing\out.txt: not found (OS error 3)"
+        );
         let e = std::io::Error::from_raw_os_error(5);
         assert_eq!(write_failure("out.txt", &e), "error: could not write out.txt: access denied (OS error 5)");
     }

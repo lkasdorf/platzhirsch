@@ -140,7 +140,15 @@ impl TreemapCache {
     /// is laid out only once it has been the same for [`RESIZE_SETTLE`] up to
     /// `now`; until then the old tiles stay. A size below one point (or not a
     /// number) gives `None`: nothing to draw.
-    pub fn update(&mut self, tree: &Tree, node: NodeId, metric: Metric, width: f32, height: f32, now: Instant) -> Option<Laid> {
+    pub fn update(
+        &mut self,
+        tree: &Tree,
+        node: NodeId,
+        metric: Metric,
+        width: f32,
+        height: f32,
+        now: Instant,
+    ) -> Option<Laid> {
         let whole = |v: f32| {
             let r = v.round();
             (r.is_finite() && r >= 1.0).then_some(r as u32)
@@ -320,11 +328,7 @@ fn left_out_text(left: LeftOut) -> String {
 
 /// The folder the treemap shows: the selection, or a selected file's parent.
 pub fn shown_node(tree: &Tree, selected: NodeId) -> NodeId {
-    if tree.is_dir(selected) {
-        selected
-    } else {
-        tree.parent(selected).unwrap_or_else(|| tree.root())
-    }
+    if tree.is_dir(selected) { selected } else { tree.parent(selected).unwrap_or_else(|| tree.root()) }
 }
 
 /// Over the header strip of the first tile (the folder shown) at layout
@@ -361,10 +365,7 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
         // Nothing else may cause a frame once the user stops dragging.
         ui.ctx().request_repaint_after(wait);
     }
-    let map = Mapping {
-        origin: area.min,
-        scale: vec2(area.width() / laid.w as f32, area.height() / laid.h as f32),
-    };
+    let map = Mapping { origin: area.min, scale: vec2(area.width() / laid.w as f32, area.height() / laid.h as f32) };
 
     let dark = ui.visuals().dark_mode;
     let painter = ui.painter_at(area);
@@ -476,7 +477,10 @@ mod tests {
         assert_eq!(text(1_683_667, None, false), "1,683,667 entries too small to draw");
         assert_eq!(text(1_204, Some(2048), false), format!("1,204 entries ({}) too small to draw", format_bytes(2048)));
         assert_eq!(text(1, Some(5), false), format!("1 entry ({}) too small to draw", format_bytes(5)));
-        assert_eq!(text(7, Some(5), true), format!("7 entries ({}) not drawn (limit of 300,000 tiles)", format_bytes(5)));
+        assert_eq!(
+            text(7, Some(5), true),
+            format!("7 entries ({}) not drawn (limit of 300,000 tiles)", format_bytes(5))
+        );
         assert_eq!(text(7, None, true), "7 entries not drawn (limit of 300,000 tiles)");
     }
 
@@ -497,7 +501,10 @@ mod tests {
         assert_eq!(left_out(&s, &whole, whole.len(), Metric::Size), None);
         // Nothing drawn: every entry in the folder, and no size of its own.
         let none = layout(&t, 0, Metric::Size, treemap::Rect { x: 0.0, y: 0.0, w: 3.0, h: 3.0 });
-        assert_eq!(left_out(&t, &none, 0, Metric::Size), Some(LeftOut { entries: 200_006, bytes: None, capped: false }));
+        assert_eq!(
+            left_out(&t, &none, 0, Metric::Size),
+            Some(LeftOut { entries: 200_006, bytes: None, capped: false })
+        );
         // Cut short by the limit: 100 files of 1..=100 bytes, tiles for the ten largest.
         let mut b = TreeBuilder::with_capacity(101, 64);
         let root = b.push("r", NO_PARENT, 0, 0, 0, F_DIR);
@@ -506,7 +513,10 @@ mod tests {
         }
         let t = b.finish(root).0;
         let tiles = treemap::layout_with(&t, 0, Metric::Size, bounds, 0.0, 0.0, 11);
-        assert_eq!(left_out(&t, &tiles, 0, Metric::Size), Some(LeftOut { entries: 90, bytes: Some(4095), capped: true }));
+        assert_eq!(
+            left_out(&t, &tiles, 0, Metric::Size),
+            Some(LeftOut { entries: 90, bytes: Some(4095), capped: true })
+        );
     }
 
     #[test]
@@ -566,7 +576,14 @@ mod tests {
 
     #[test]
     fn elided_tiles_are_visibly_darker_in_both_themes() {
-        let tile = |depth, elided| Tile { node: 0, rect: treemap::Rect { x: 0.0, y: 0.0, w: 9.0, h: 9.0 }, depth, elided, partial: false, capped: false };
+        let tile = |depth, elided| Tile {
+            node: 0,
+            rect: treemap::Rect { x: 0.0, y: 0.0, w: 9.0, h: 9.0 },
+            depth,
+            elided,
+            partial: false,
+            capped: false,
+        };
         for dark in [false, true] {
             for d in 0..8u8 {
                 let (plain, shaded) = (tile_color(&tile(d, false), dark), tile_color(&tile(d, true), dark));
@@ -795,16 +812,14 @@ mod tests {
             let mut view = TreeView::new(&tree, Metric::Size);
             view.reveal(&tree, shown);
             let state = State { tree, view, cache: TreemapCache::default(), now: Instant::now(), clicked: None };
-            Harness::builder()
-                .with_size(vec2(800.0, 300.0))
-                .build_ui_state(
-                    |ui, s: &mut State| {
-                        if let Some(n) = show(ui, &s.tree, &s.view, &mut s.cache, s.now) {
-                            s.clicked = Some(n);
-                        }
-                    },
-                    state,
-                )
+            Harness::builder().with_size(vec2(800.0, 300.0)).build_ui_state(
+                |ui, s: &mut State| {
+                    if let Some(n) = show(ui, &s.tree, &s.view, &mut s.cache, s.now) {
+                        s.clicked = Some(n);
+                    }
+                },
+                state,
+            )
         }
 
         fn origin(h: &Harness<'_, State>) -> Pos2 {
@@ -871,7 +886,12 @@ mod tests {
             h.run();
             let at = origin(&h) + vec2(100.0, 6.0);
             for pressed in [true, false] {
-                h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.event(Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
             }
             h.run();
             assert_eq!(h.state().clicked, Some(0));
@@ -893,7 +913,12 @@ mod tests {
             let (x, y) = map.to_layout(mid);
             let node = hit_test(h.state().cache.tiles(), x, y).unwrap();
             for pressed in [true, false] {
-                h.event(Event::PointerButton { pos: mid, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.event(Event::PointerButton {
+                    pos: mid,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
             }
             h.run();
             assert_eq!(h.state().clicked, Some(node));

@@ -14,10 +14,7 @@ pub struct BootSector {
 const BOOT_SECTOR_LEN: usize = 512;
 
 fn le_u64(buf: &[u8], at: usize) -> Result<u64, NtfsError> {
-    let bytes: [u8; 8] = buf
-        .get(at..at + 8)
-        .and_then(|s| s.try_into().ok())
-        .ok_or(NtfsError::Truncated)?;
+    let bytes: [u8; 8] = buf.get(at..at + 8).and_then(|s| s.try_into().ok()).ok_or(NtfsError::Truncated)?;
     Ok(u64::from_le_bytes(bytes))
 }
 
@@ -47,28 +44,23 @@ pub fn parse_boot_sector(buf: &[u8]) -> Result<BootSector, NtfsError> {
     } else {
         // Values above 0x80 are a negative i8: 2^(-v) sectors.
         let exp = 256 - u32::from(spc_raw);
-        1u32.checked_shl(exp)
-            .ok_or(NtfsError::Malformed("sectors per cluster exponent too large"))?
+        1u32.checked_shl(exp).ok_or(NtfsError::Malformed("sectors per cluster exponent too large"))?
     };
     if !sectors_per_cluster.is_power_of_two() {
         return Err(NtfsError::Malformed("sectors per cluster not a power of two"));
     }
-    let cluster_size = bytes_per_sector
-        .checked_mul(sectors_per_cluster)
-        .ok_or(NtfsError::Malformed("cluster size overflows"))?;
+    let cluster_size =
+        bytes_per_sector.checked_mul(sectors_per_cluster).ok_or(NtfsError::Malformed("cluster size overflows"))?;
 
     let record_raw = buf[0x40] as i8;
     let record_size: u32 = if record_raw > 0 {
-        cluster_size
-            .checked_mul(record_raw as u32)
-            .ok_or(NtfsError::Malformed("record size overflows"))?
+        cluster_size.checked_mul(record_raw as u32).ok_or(NtfsError::Malformed("record size overflows"))?
     } else if record_raw == 0 {
         return Err(NtfsError::Malformed("record size is zero"));
     } else {
         // Negative: 2^(-v) bytes.
         let exp = u32::from(record_raw.unsigned_abs());
-        1u32.checked_shl(exp)
-            .ok_or(NtfsError::Malformed("record size exponent too large"))?
+        1u32.checked_shl(exp).ok_or(NtfsError::Malformed("record size exponent too large"))?
     };
     if !record_size.is_power_of_two() {
         return Err(NtfsError::Malformed("record size not a power of two"));
@@ -101,10 +93,7 @@ mod tests {
     #[test]
     fn parses_standard_layout() {
         let b = parse_boot_sector(&sample(0xF6)).unwrap();
-        assert_eq!(
-            (b.bytes_per_sector, b.cluster_size, b.mft_lcn, b.record_size),
-            (512, 4096, 786432, 1024)
-        );
+        assert_eq!((b.bytes_per_sector, b.cluster_size, b.mft_lcn, b.record_size), (512, 4096, 786432, 1024));
         assert_eq!(b.total_sectors, 1_000_000);
     }
 

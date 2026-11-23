@@ -90,9 +90,7 @@ fn nonresident_attr(
     let name_off = if extended { 0x48 } else { 0x40 };
     let run_off = align8(name_off + 2 * name.len());
     let len = align8(run_off + runs.len() + 1); // + terminator byte
-    let clusters: u64 = decode_runs(runs)
-        .map(|r| r.iter().map(|x| x.clusters).sum())
-        .unwrap_or(0);
+    let clusters: u64 = decode_runs(runs).map(|r| r.iter().map(|x| x.clusters).sum()).unwrap_or(0);
     let mut a = vec![0u8; len];
     put_u32(&mut a, 0x00, attr_type);
     put_u32(&mut a, 0x04, len as u32);
@@ -183,7 +181,14 @@ impl RecordBuilder {
     /// `file_attributes` goes to value offset `0x38`, `ea_or_reparse` (packed
     /// EA size or reparse tag) to `0x3C` (ntfs3 `NTFS_DUP_INFO.fa` and
     /// `.extend_data`, inside `ATTR_FILE_NAME` at `0x08`).
-    fn file_name_full(mut self, parent: u64, name: &[u16], namespace: u8, file_attributes: u32, ea_or_reparse: u32) -> Self {
+    fn file_name_full(
+        mut self,
+        parent: u64,
+        name: &[u16],
+        namespace: u8,
+        file_attributes: u32,
+        ea_or_reparse: u32,
+    ) -> Self {
         let mut v = vec![0u8; 0x42 + 2 * name.len()];
         put_u64(&mut v, 0x00, parent | REF_SEQ);
         put_u32(&mut v, 0x38, file_attributes);

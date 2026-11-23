@@ -56,11 +56,7 @@ fn scanning_label(ui: &mut egui::Ui, elapsed: Duration) {
 
 /// What a running scan shows: `Cancelling…` once Cancel was pressed, else the dots.
 pub(super) fn scan_indicator(progress: &Progress, elapsed: Duration) -> String {
-    if progress.cancel.load(Ordering::Relaxed) {
-        CANCELLING.to_string()
-    } else {
-        scanning_text(elapsed)
-    }
+    if progress.cancel.load(Ordering::Relaxed) { CANCELLING.to_string() } else { scanning_text(elapsed) }
 }
 
 /// A drive as shown in the drive list, e.g. `C:  NTFS  3.7 TB`.
@@ -72,11 +68,9 @@ fn target_label(app: &App) -> String {
     match &app.target {
         None => String::new(),
         Some(ScanTarget::Folder(path)) => path.display().to_string(),
-        Some(ScanTarget::Volume(letter)) => app
-            .volumes
-            .iter()
-            .find(|v| v.letter == *letter)
-            .map_or_else(|| format!("{letter}:"), volume_label),
+        Some(ScanTarget::Volume(letter)) => {
+            app.volumes.iter().find(|v| v.letter == *letter).map_or_else(|| format!("{letter}:"), volume_label)
+        }
     }
 }
 
@@ -93,11 +87,9 @@ pub fn status_text(result: &ScanResult, volume: Option<&VolumeInfo>) -> String {
         ScanMethod::Mft => format!("MFT scan, {seconds} s"),
         ScanMethod::Walk => format!("Folder scan, allocated approximate, {seconds} s"),
     });
-    for (n, what) in [
-        (result.skipped, "skipped"),
-        (result.unreadable, "unreadable"),
-        (result.online_only, "online-only"),
-    ] {
+    for (n, what) in
+        [(result.skipped, "skipped"), (result.unreadable, "unreadable"), (result.online_only, "online-only")]
+    {
         if n > 0 {
             parts.push(format!("{} {what}", format_count(n)));
         }
@@ -234,26 +226,15 @@ mod tests {
             b.push("f", root, 1, 4096, 0, 0);
         }
         let (tree, _) = b.finish(root);
-        ScanResult {
-            tree,
-            method,
-            duration: Duration::from_millis(millis),
-            skipped: 0,
-            unreadable: 0,
-            online_only: 0,
-        }
+        ScanResult { tree, method, duration: Duration::from_millis(millis), skipped: 0, unreadable: 0, online_only: 0 }
     }
 
     #[test]
     fn status_for_mft_scan_of_a_volume() {
         let mut result = result_with_files(1_683_667, ScanMethod::Mft, 4200);
         result.skipped = 3;
-        let volume = VolumeInfo {
-            letter: 'C',
-            fs_name: "NTFS".into(),
-            total: 4_090_260_848_640,
-            free: 1_407_374_883_553,
-        };
+        let volume =
+            VolumeInfo { letter: 'C', fs_name: "NTFS".into(), total: 4_090_260_848_640, free: 1_407_374_883_553 };
         let s = status_text(&result, Some(&volume));
         assert_eq!(s, "Free: 1.3 TB of 3.7 TB | 1,683,667 files | MFT scan, 4.2 s | 3 skipped");
     }
@@ -307,9 +288,7 @@ mod tests {
         }
 
         fn harness(app: App, now: Instant, scan: Option<mpsc::Sender<ScanOutcome>>) -> Harness<'static, State> {
-            Harness::builder()
-                .with_size(vec2(1000.0, 200.0))
-                .build_ui_state(
+            Harness::builder().with_size(vec2(1000.0, 200.0)).build_ui_state(
                 |ui, s: &mut State| {
                     if let Some(action) = top_bar(ui, &mut s.app, s.now) {
                         if matches!(action, Action::Cancel) {
@@ -421,7 +400,8 @@ mod tests {
             }
             // The `Show` choices: one group with two radio buttons.
             let group = h.get_by_role_and_label(Role::RadioGroup, "Show");
-            let choices: Vec<_> = group.query_all_by_role(Role::RadioButton).map(|n| n.accesskit_node().label()).collect();
+            let choices: Vec<_> =
+                group.query_all_by_role(Role::RadioButton).map(|n| n.accesskit_node().label()).collect();
             assert_eq!(choices, [Some("Allocated".to_string()), Some("Size".to_string())]);
             // The treemap switch tells whether it is on.
             let switch = h.get_by_role_and_label(Role::Button, "Treemap");

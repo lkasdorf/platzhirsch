@@ -8,8 +8,8 @@
 //! name repeats what the row shows, and the selected row is the item the
 //! keyboard focus is on. The cells' own texts are hidden from them.
 use eframe::egui::{
-    self, Align, Color32, Context, Event, FocusDirection, Id, IdSalt, Key, Layout, Popup, Rangef, Rect, Response,
-    Role, ScrollArea, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
+    self, Align, Color32, Context, Event, FocusDirection, Id, IdSalt, Key, Layout, Popup, Rangef, Rect, Response, Role,
+    ScrollArea, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
@@ -268,7 +268,8 @@ fn header_cell(
         let enabled = ui.is_enabled();
         response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, format!("Sort by {title}")));
         if let Some(desc) = sorted {
-            let direction = if desc { accesskit::SortDirection::Descending } else { accesskit::SortDirection::Ascending };
+            let direction =
+                if desc { accesskit::SortDirection::Descending } else { accesskit::SortDirection::Ascending };
             ctx.accesskit_node_builder(response.id, |node| node.set_sort_direction(direction));
         }
         if response.has_focus() {
@@ -387,10 +388,8 @@ fn name_cell(
     let fraction = bar_fraction(tree, node, view.metric());
     if fraction > 0.0 && cell.right() > start {
         let width = (cell.right() - start) * fraction;
-        let bar = Rect::from_min_size(
-            egui::pos2(start, cell.center().y - row_height * 0.35),
-            vec2(width, row_height * 0.7),
-        );
+        let bar =
+            Rect::from_min_size(egui::pos2(start, cell.center().y - row_height * 0.35), vec2(width, row_height * 0.7));
         ui.painter().rect_filled(bar, 2.0, BAR_COLOR);
     }
     // The full path replaces egui's own tooltip for a cut-off name; it is
@@ -850,9 +849,9 @@ mod tests {
     // with synthetic input. No window, no renderer, simulated time only.
     mod ui {
         use super::*;
+        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
         use egui_kittest::Harness;
         use egui_kittest::kittest::{NodeT, Queryable};
-        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
 
         struct State {
             tree: Tree,
@@ -980,7 +979,12 @@ mod tests {
             h.hover_at(pos);
             for _ in 0..2 {
                 for pressed in [true, false] {
-                    h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                    h.event(Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    });
                 }
             }
             h.run();

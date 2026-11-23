@@ -182,11 +182,8 @@ impl App {
 
     /// An idle app with drive C (or the first drive) selected.
     fn with_volumes(volumes: Vec<VolumeInfo>) -> Self {
-        let target = volumes
-            .iter()
-            .find(|v| v.letter == 'C')
-            .or_else(|| volumes.first())
-            .map(|v| ScanTarget::Volume(v.letter));
+        let target =
+            volumes.iter().find(|v| v.letter == 'C').or_else(|| volumes.first()).map(|v| ScanTarget::Volume(v.letter));
         App {
             volumes,
             target,

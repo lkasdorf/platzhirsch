@@ -274,7 +274,14 @@ const SIZE_LIMIT_ID: usize = 1;
 
 /// Runs before the window's own procedure: cuts every new size to the limit
 /// in `max`, then passes the message on.
-unsafe extern "system" fn size_limit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, max: usize) -> LRESULT {
+unsafe extern "system" fn size_limit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    max: usize,
+) -> LRESULT {
     if msg == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
         // SAFETY: for this message Windows passes a pointer to a WINDOWPOS the
         // receiver may change.
@@ -662,7 +669,20 @@ mod tests {
             use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WINDOW_EX_STYLE, WS_POPUP};
             // SAFETY: "STATIC" is a system window class; no parent, menu or creation data is passed.
             let hwnd = unsafe {
-                CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), PCWSTR::null(), WS_POPUP, 0, 0, 300, 200, None, None, None, None)
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    PCWSTR::null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    300,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             };
             Hidden(hwnd.expect("a hidden window"))
         }
@@ -670,11 +690,14 @@ mod tests {
         /// Asks for the outer size `cx` x `cy` the way another program would, and returns the size the window has then.
         fn resize(&self, cx: i32, cy: i32) -> (i32, i32) {
             use windows::Win32::Foundation::RECT;
-            use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowRect, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+            };
             let mut rect = RECT::default();
             // SAFETY: the window is alive and `rect` is valid for the call.
             unsafe {
-                SetWindowPos(self.0, None, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).expect("SetWindowPos");
+                SetWindowPos(self.0, None, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    .expect("SetWindowPos");
                 GetWindowRect(self.0, &mut rect).expect("GetWindowRect");
             }
             (rect.right - rect.left, rect.bottom - rect.top)
@@ -703,7 +726,10 @@ mod tests {
         // A move without a new size is not a resize.
         use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
         // SAFETY: the window is alive.
-        unsafe { SetWindowPos(window.0, None, 40, 50, 99_999, 99_999, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).expect("move") };
+        unsafe {
+            SetWindowPos(window.0, None, 40, 50, 99_999, 99_999, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                .expect("move")
+        };
         assert_eq!(window.resize(900, 600), (900, 600));
     }
 

@@ -17,11 +17,11 @@ use std::time::Instant;
 
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-    NtOpenFile,
+    FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtOpenFile,
 };
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
+    UNICODE_STRING,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -196,8 +196,8 @@ fn open_dir(path: &[u16], follow: bool) -> io::Result<DirHandle> {
 /// Opens `path` (verbatim, no NUL) with `NtOpenFile`, sharing everything.
 fn nt_open(path: &[u16], access: FILE_ACCESS_RIGHTS, options: u32) -> io::Result<DirHandle> {
     let nt = nt_path(path)?;
-    let bytes = u16::try_from(nt.len() * 2)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path too long"))?;
+    let bytes =
+        u16::try_from(nt.len() * 2).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path too long"))?;
     // The buffer is only read; the binding's type is `PWSTR` nonetheless.
     let name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: PWSTR(nt.as_ptr().cast_mut()) };
     let attributes = OBJECT_ATTRIBUTES {
@@ -292,12 +292,7 @@ fn list_dir(path: &[u16], follow: bool, cancel: &AtomicBool) -> Listing {
         buf.fill(0);
         // SAFETY: `buf` is a live, 8-byte aligned buffer of exactly LIST_BUF_BYTES bytes.
         let r = unsafe {
-            GetFileInformationByHandleEx(
-                dir.0,
-                FileIdBothDirectoryInfo,
-                buf.as_mut_ptr().cast(),
-                LIST_BUF_BYTES as u32,
-            )
+            GetFileInformationByHandleEx(dir.0, FileIdBothDirectoryInfo, buf.as_mut_ptr().cast(), LIST_BUF_BYTES as u32)
         };
         if let Err(e) = r {
             let e = to_io(e);
@@ -793,7 +788,8 @@ fn scan_walk_limited(root: &Path, progress: &Progress, limits: Limits) -> Result
                     break 'listings Err(too_many_entries());
                 }
                 entry_count += 1;
-                let link = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
+                let link =
+                    e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
                 if e.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                     b.push(&e.name, job.dir, e.size, e.allocated, e.mtime, if link { F_LINK } else { 0 });
                     continue;
@@ -964,7 +960,8 @@ mod tests {
                 ];
                 for (link, target) in &links {
                     let given = verbatim_path(Path::new(link)).unwrap();
-                    let is_link = entry_attributes(&given).is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
+                    let is_link =
+                        entry_attributes(&given).is_some_and(|(a, tag)| classify_dir(a, tag) == DirAction::Link);
                     if !is_link {
                         eprintln!("skipped {link}: not a link on this system");
                         continue;
@@ -1010,8 +1007,8 @@ mod tests {
     #[test]
     fn panic_in_the_coordinating_step_ends_the_walk() {
         let tmp = tempfile::tempdir().unwrap();
-        let outcome = walk_with_timeout(tmp.path(), LIMITS, true)
-            .expect("the walk hangs after a panic in its coordinating step");
+        let outcome =
+            walk_with_timeout(tmp.path(), LIMITS, true).expect("the walk hangs after a panic in its coordinating step");
         assert!(outcome.is_none(), "the panic does not propagate");
         // Without the injected panic the same walk succeeds.
         let outcome = walk_with_timeout(tmp.path(), LIMITS, false).expect("the walk hangs");
@@ -1026,7 +1023,9 @@ mod tests {
         let name_len = |p: &Path| p.file_name().unwrap().to_str().unwrap().len();
         let total = root_name(tmp.path()).unwrap().len() + name_len(sub.path()) + name_len(file.path());
         let walk = |names| {
-            walk_with_timeout(tmp.path(), Limits { names, ..LIMITS }, false).expect("the walk hangs").expect("the walk panics")
+            walk_with_timeout(tmp.path(), Limits { names, ..LIMITS }, false)
+                .expect("the walk hangs")
+                .expect("the walk panics")
         };
         let tree = walk(total).expect("names within the limit");
         assert_eq!(tree.tree.len(), 3);
@@ -1161,7 +1160,9 @@ mod tests {
         let _sub = tempfile::tempdir_in(tmp.path()).unwrap();
         let _file = tempfile::NamedTempFile::new_in(tmp.path()).unwrap();
         let walk = |entries| {
-            walk_with_timeout(tmp.path(), Limits { entries, ..LIMITS }, false).expect("the walk hangs").expect("the walk panics")
+            walk_with_timeout(tmp.path(), Limits { entries, ..LIMITS }, false)
+                .expect("the walk hangs")
+                .expect("the walk panics")
         };
         // The root and its two entries.
         assert_eq!(walk(3).expect("entries within the limit").tree.len(), 3);

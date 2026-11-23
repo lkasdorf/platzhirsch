@@ -59,19 +59,10 @@ impl TreeBuilder {
 
     /// Ids are assigned in call order (0, 1, 2 ...).
     /// `parent` may point to an id that is pushed later.
-    pub fn push(
-        &mut self,
-        name: &str,
-        parent: NodeId,
-        size: u64,
-        allocated: u64,
-        mtime: i64,
-        flags: u8,
-    ) -> NodeId {
+    pub fn push(&mut self, name: &str, parent: NodeId, size: u64, allocated: u64, mtime: i64, flags: u8) -> NodeId {
         let id = self.parent.len();
         assert!(id < NO_PARENT as usize, "too many entries");
-        self.name_start
-            .push(u32::try_from(self.names.len()).expect("name buffer exceeds 4 GiB"));
+        self.name_start.push(u32::try_from(self.names.len()).expect("name buffer exceeds 4 GiB"));
         self.names.push_str(name);
         self.parent.push(parent);
         self.size.push(size);
@@ -88,15 +79,7 @@ impl TreeBuilder {
     }
 
     pub fn finish(self, root: NodeId) -> (Tree, BuildStats) {
-        let Self {
-            names,
-            mut name_start,
-            mut parent,
-            mut size,
-            mut allocated,
-            mut mtime,
-            flags,
-        } = self;
+        let Self { names, mut name_start, mut parent, mut size, mut allocated, mut mtime, flags } = self;
         let n = parent.len();
         assert!((root as usize) < n, "root id out of range");
         name_start.push(u32::try_from(names.len()).expect("name buffer exceeds 4 GiB"));
@@ -305,10 +288,7 @@ impl Tree {
     /// The child of `dir` called `name`, compared case-insensitively.
     pub fn child_by_name(&self, dir: NodeId, name: &str) -> Option<NodeId> {
         let wanted = || name.chars().flat_map(char::to_lowercase);
-        self.children(dir)
-            .iter()
-            .copied()
-            .find(|&c| self.name(c).chars().flat_map(char::to_lowercase).eq(wanted()))
+        self.children(dir).iter().copied().find(|&c| self.name(c).chars().flat_map(char::to_lowercase).eq(wanted()))
     }
 
     fn cmp_names(&self, a: NodeId, b: NodeId) -> Ordering {
@@ -337,10 +317,7 @@ mod tests {
     #[test]
     fn aggregates() {
         let (t, s) = sample();
-        assert_eq!(
-            (t.size(0), t.allocated(0), t.file_count(0), t.dir_count(0), t.mtime(0)),
-            (1016, 12288, 4, 2, 50)
-        );
+        assert_eq!((t.size(0), t.allocated(0), t.file_count(0), t.dir_count(0), t.mtime(0)), (1016, 12288, 4, 2, 50));
         assert_eq!((t.size(1), t.file_count(1), t.dir_count(1)), (1015, 3, 1));
         assert_eq!(t.file_count(2), 0);
         assert_eq!(s.orphaned, 1);

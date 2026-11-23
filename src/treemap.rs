@@ -77,10 +77,7 @@ pub fn layout_with(
     max_tiles: usize,
 ) -> Vec<Tile> {
     let mut out = vec![Tile { node: root, rect: bounds, depth: 0, elided: false, partial: false, capped: false }];
-    let finite = bounds.x.is_finite()
-        && bounds.y.is_finite()
-        && bounds.w.is_finite()
-        && bounds.h.is_finite();
+    let finite = bounds.x.is_finite() && bounds.y.is_finite() && bounds.w.is_finite() && bounds.h.is_finite();
     if !finite || bounds.w <= 0.0 || bounds.h <= 0.0 {
         out[0].elided = has_valued_child(tree, root, metric);
         return out;
@@ -247,11 +244,7 @@ fn squarify(
         let last_row = j == kids.len();
         let wide = w >= h;
         // Thickness of the row across the short side; the last row takes what is left.
-        let thick = if last_row {
-            if wide { w } else { h }
-        } else {
-            (row_area / side).min(if wide { w } else { h })
-        };
+        let thick = if last_row { if wide { w } else { h } } else { (row_area / side).min(if wide { w } else { h }) };
         let row_len = side;
         let mut offset = 0.0;
         for (k, &(node, value)) in kids[i..j].iter().enumerate() {
@@ -310,7 +303,7 @@ pub fn hit_index(tiles: &[Tile], x: f32, y: f32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TreeBuilder, F_DIR, NO_PARENT};
+    use crate::model::{F_DIR, NO_PARENT, TreeBuilder};
     use std::collections::HashMap;
 
     fn sample() -> Tree {
@@ -375,12 +368,8 @@ mod tests {
     /// The part of a folder tile its children are laid out in: minus the
     /// padding and, where one is reserved, minus the header.
     fn content(parent: Rect) -> Rect {
-        let mut r = Rect {
-            x: parent.x + PAD_PT,
-            y: parent.y + PAD_PT,
-            w: parent.w - 2.0 * PAD_PT,
-            h: parent.h - 2.0 * PAD_PT,
-        };
+        let mut r =
+            Rect { x: parent.x + PAD_PT, y: parent.y + PAD_PT, w: parent.w - 2.0 * PAD_PT, h: parent.h - 2.0 * PAD_PT };
         if parent.w >= HEADER_MIN_W && parent.h >= HEADER_MIN_H {
             r.y += HEADER_PT;
             r.h -= HEADER_PT;
@@ -551,7 +540,14 @@ mod tests {
     #[test]
     fn body_is_where_the_children_are_laid_out() {
         let t = sample();
-        let tile = |w, h| Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w, h }, depth: 1, elided: false, partial: false, capped: false };
+        let tile = |w, h| Tile {
+            node: 1,
+            rect: Rect { x: 10.0, y: 20.0, w, h },
+            depth: 1,
+            elided: false,
+            partial: false,
+            capped: false,
+        };
         // With a header strip, and too small for one.
         for folder in [tile(100.0, 50.0), tile(HEADER_MIN_W - 1.0, 50.0), tile(100.0, HEADER_MIN_H - 1.0)] {
             assert_eq!(body(&folder), content(folder.rect));
@@ -642,7 +638,14 @@ mod tests {
     #[test]
     fn header_strip_only_on_large_folder_tiles() {
         let t = sample();
-        let folder = Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 }, depth: 1, elided: false, partial: false, capped: false };
+        let folder = Tile {
+            node: 1,
+            rect: Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 },
+            depth: 1,
+            elided: false,
+            partial: false,
+            capped: false,
+        };
         assert_eq!(
             header_strip(&t, &folder),
             Some(Rect { x: 10.0 + PAD_PT, y: 20.0 + PAD_PT, w: 100.0 - 2.0 * PAD_PT, h: HEADER_PT })
