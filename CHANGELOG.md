@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Treemap: where a folder shows only some of its entries, the space of the others is drawn
+  in the darker shade that folders too small to subdivide already have. The tooltip of the
+  folder says how many entries of which size are not drawn. Before, that space had the
+  folder's plain colour and nothing said what it was.
+
 ### Changed
 
+- Treemap: a treemap has at most 300,000 tiles. The largest folders are subdivided first
+  and in a folder the largest entries are drawn first; what the limit leaves out is marked
+  as not drawn. A drive with 1.9 million entries needs about 169,000 tiles on a panel of
+  3840 x 1400 points, so this bounds only trees with millions of entries of similar size.
 - A drive made with `subst` is scanned with the folder scan right away. It was offered the
   fast scan, which it cannot have: the restart with administrator rights ended in an error.
 - Continuous integration also compiles the project with Rust 1.95, the minimum version it
