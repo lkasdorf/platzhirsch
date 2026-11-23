@@ -247,10 +247,26 @@ fn explorer_program() -> Option<std::path::PathBuf> {
     None
 }
 
+/// `path` in the form Explorer takes: without the `\\?\` prefix a path may
+/// carry when it was given that way on the command line. Explorer selects
+/// nothing for `\\?\C:\x`; it wants `C:\x`, and `\\server\share\x` for
+/// `\\?\UNC\server\share\x`. Any other path is returned as it is.
+fn explorer_path(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let Some(rest) = path.strip_prefix(r"\\?\") else { return Cow::Borrowed(path) };
+    match rest.get(..4) {
+        Some(unc) if unc.eq_ignore_ascii_case(r"UNC\") => Cow::Owned(format!(r"\\{}", &rest[4..])),
+        _ if rest.as_bytes().get(1) == Some(&b':') => Cow::Borrowed(rest),
+        // A volume name (`\\?\Volume{...}\`) has no other spelling.
+        _ => Cow::Borrowed(path),
+    }
+}
+
 /// Opens an Explorer window with `path` selected. Starts nothing if `path`
 /// contains a `"` or the Windows directory cannot be read.
 pub fn reveal_in_explorer(path: &str) {
-    let (Some(arg), Some(program)) = (explorer_select_arg(path), explorer_program()) else { return };
+    let path = explorer_path(path);
+    let (Some(arg), Some(program)) = (explorer_select_arg(&path), explorer_program()) else { return };
     let _ = std::process::Command::new(program).raw_arg(arg).spawn();
 }
 
@@ -385,6 +401,24 @@ mod tests {
             (r"\\nas\share\d", r#"/select,"\\nas\share\d""#),
         ] {
             assert_eq!(explorer_select_arg(path).as_deref(), Some(arg), "{path}");
+        }
+    }
+
+    #[test]
+    fn explorer_gets_paths_without_the_verbatim_prefix() {
+        for (path, shown) in [
+            (r"\\?\C:\Data\x.txt", r"C:\Data\x.txt"),
+            (r"\\?\c:\", r"c:\"),
+            (r"\\?\UNC\nas\share\d", r"\\nas\share\d"),
+            (r"\\?\unc\nas\share", r"\\nas\share"),
+            // Nothing to take off.
+            (r"C:\Data\x.txt", r"C:\Data\x.txt"),
+            (r"\\nas\share\d", r"\\nas\share\d"),
+            (r"\\?\Volume{0000}\x", r"\\?\Volume{0000}\x"),
+            (r"\\?\", r"\\?\"),
+            ("", ""),
+        ] {
+            assert_eq!(explorer_path(path), shown, "{path}");
         }
     }
 
