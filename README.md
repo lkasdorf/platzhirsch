@@ -129,7 +129,8 @@ The design document and the implementation plan are in
 
 ## Known limits
 
-- The fast scan works on NTFS only. Other file systems use the fallback scan.
+- The fast scan works on NTFS only. Other file systems use the fallback scan, and so does
+  a drive made with `subst`, which is a folder under a drive letter.
 - A file with several hard links is counted once and shown under one of its names, so
   folder totals inside `Windows` can differ from tools that count every name.
 - In the fallback scan, "allocated" is an approximation and hard links are counted once
