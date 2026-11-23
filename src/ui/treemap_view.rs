@@ -103,6 +103,8 @@ pub struct TreemapCache {
     /// The fills and outlines of all tiles, for the computation, the mapping
     /// and the theme it was built for.
     mesh: Option<((u32, Mapping, bool), Arc<Mesh>)>,
+    /// How often the mesh was built; the tests count it.
+    #[cfg(test)]
     mesh_builds: u32,
     /// The selected node, the computation, and the index of its tile.
     selected: Option<(NodeId, u32, Option<usize>)>,
@@ -176,7 +178,10 @@ impl TreemapCache {
         }
         let mesh = Arc::new(build_mesh(&self.tiles, map, dark));
         self.mesh = Some((key, Arc::clone(&mesh)));
-        self.mesh_builds += 1;
+        #[cfg(test)]
+        {
+            self.mesh_builds += 1;
+        }
         mesh
     }
 

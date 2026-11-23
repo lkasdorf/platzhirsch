@@ -28,17 +28,6 @@ pub trait VolumeReader: Send {
     fn set_sector_size(&mut self, _bytes: u32) {}
 }
 
-/// Where the MFT lives on the volume.
-pub struct MftLayout {
-    /// Extents in VCN order; none of them is sparse.
-    pub runs: Vec<Run>,
-    /// Bytes of the MFT that hold records: the smaller of the real size and
-    /// the initialized size of the unnamed `$DATA` of record 0. Beyond the
-    /// initialized size the MFT holds no valid records, only leftovers.
-    pub byte_len: u64,
-    pub record_count: u64,
-}
-
 /// Bytes read from the volume per chunk. A multiple of every valid record
 /// size (at most 64 KiB) and of every valid cluster size (at most 2 MiB).
 const CHUNK_BYTES: u64 = 8 << 20;
@@ -305,16 +294,6 @@ fn read_attr_list<R: VolumeReader>(
         return Err(malformed("attribute list runs shorter than its length"));
     }
     Ok(out)
-}
-
-/// Finds the MFT: record 0, plus the extension records its attribute list names.
-pub fn locate_mft<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<MftLayout, ScanError> {
-    let Located { map, byte_len } = locate_map(r, boot)?;
-    Ok(MftLayout {
-        runs: map.runs,
-        byte_len,
-        record_count: byte_len / u64::from(boot.record_size),
-    })
 }
 
 const KIND_EMPTY: u8 = 0;
@@ -621,6 +600,27 @@ mod tests {
     use crate::scan::ntfs::boot::parse_boot_sector;
     use crate::scan::ntfs::testkit::{FakeVolume, RecordBuilder, attr_list_bytes, fake_volume};
     use std::sync::atomic::Ordering;
+
+    /// Where the MFT lives on the volume.
+    struct MftLayout {
+        /// Extents in VCN order; none of them is sparse.
+        runs: Vec<Run>,
+        /// Bytes of the MFT that hold records: the smaller of the real size and
+        /// the initialized size of the unnamed `$DATA` of record 0. Beyond the
+        /// initialized size the MFT holds no valid records, only leftovers.
+        byte_len: u64,
+        record_count: u64,
+    }
+
+    /// Finds the MFT: record 0, plus the extension records its attribute list names.
+    fn locate_mft<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<MftLayout, ScanError> {
+        let Located { map, byte_len } = locate_map(r, boot)?;
+        Ok(MftLayout {
+            runs: map.runs,
+            byte_len,
+            record_count: byte_len / u64::from(boot.record_size),
+        })
+    }
 
     const MFT_START: u64 = 4 * 4096;
 
