@@ -112,18 +112,11 @@ fn u64_at(b: &[u8], off: usize) -> Result<u64, NtfsError> {
 
 /// Returns `b[off..off + len]`, or `err` if that range is outside `b`.
 fn slice<'a>(b: &'a [u8], off: usize, len: usize, err: &'static str) -> Result<&'a [u8], NtfsError> {
-    off.checked_add(len)
-        .and_then(|end| b.get(off..end))
-        .ok_or(NtfsError::Malformed(err))
+    off.checked_add(len).and_then(|end| b.get(off..end)).ok_or(NtfsError::Malformed(err))
 }
 
 fn utf16_lossy(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u16::from_le_bytes(*c))
-        .collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     String::from_utf16_lossy(&units)
 }
 
@@ -154,17 +147,13 @@ pub fn apply_fixups(record: &mut [u8], block_size: usize) -> Result<(), NtfsErro
     }
     let usa_off = usize::from(u16_at(record, 0x04)?);
     let usa_count = usize::from(u16_at(record, 0x06)?);
-    let blocks = usa_count
-        .checked_sub(1)
-        .filter(|n| *n > 0)
-        .ok_or(NtfsError::Malformed("empty update sequence array"))?;
+    let blocks =
+        usa_count.checked_sub(1).filter(|n| *n > 0).ok_or(NtfsError::Malformed("empty update sequence array"))?;
     if !usa_off.is_multiple_of(2) {
         return Err(NtfsError::Malformed("odd update sequence array offset"));
     }
     // blocks <= 0xFFFE and block_size <= usize::MAX: use checked math.
-    let covered = blocks
-        .checked_mul(block_size)
-        .ok_or(NtfsError::Malformed("update sequence array too long"))?;
+    let covered = blocks.checked_mul(block_size).ok_or(NtfsError::Malformed("update sequence array too long"))?;
     if covered != record.len() {
         return Err(NtfsError::Malformed("update sequence array does not cover the record exactly"));
     }
@@ -370,10 +359,7 @@ fn parse_attribute(
                 attrs.file_name_reparse_tag = Some(u32_at(value, FILE_NAME_REPARSE_TAG_OFF)?);
             }
             if info.name.is_none() && namespace != NAMESPACE_DOS {
-                info.name = Some(NameInfo {
-                    parent: u64_at(value, 0x00)? & MFT_REF_MASK,
-                    name: utf16_lossy(name),
-                });
+                info.name = Some(NameInfo { parent: u64_at(value, 0x00)? & MFT_REF_MASK, name: utf16_lossy(name) });
             }
         }
         ATTR_DATA => {
@@ -637,17 +623,22 @@ mod tests {
 
     #[test]
     fn nonresident_reparse_uses_file_name_tag() {
-        let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000));
+        let info = parse(
+            RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000),
+        );
         assert!(info.reparse_unread && info.name_says_link);
         // The two halves alone, as they lie in a base and an extension record.
         let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003));
         assert!(!info.is_link && !info.reparse_unread && info.name_says_link);
         let info = parse(RecordBuilder::new(1024).reparse_nonresident(RUNS, 5000));
         assert!(!info.is_link && info.reparse_unread && !info.name_says_link);
-        let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000));
+        let info = parse(
+            RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000),
+        );
         assert!(info.is_link);
         // not a name surrogate
-        let info = parse(RecordBuilder::new(1024).file_name_reparse(5, "d", 1, 0x9000_001A).reparse_nonresident(RUNS, 5000));
+        let info =
+            parse(RecordBuilder::new(1024).file_name_reparse(5, "d", 1, 0x9000_001A).reparse_nonresident(RUNS, 5000));
         assert!(!info.is_link);
         // $FILE_NAME not marked as a reparse point: the tag field is no tag
         let info = parse(RecordBuilder::new(1024).file_name(5, "x", 1).reparse_nonresident(RUNS, 5000));
@@ -681,11 +672,8 @@ mod tests {
 
     #[test]
     fn badclus_named_ignored() {
-        let b = || {
-            RecordBuilder::new(1024)
-                .data_resident("", 0)
-                .data_nonresident("$Bad", 0, RUNS, 1 << 40, 1 << 40, 0, 0)
-        };
+        let b =
+            || RecordBuilder::new(1024).data_resident("", 0).data_nonresident("$Bad", 0, RUNS, 1 << 40, 1 << 40, 0, 0);
         let info = parse_as(b(), 8);
         assert_eq!(info.size, Some(0));
         assert_eq!(info.allocated, 0);
@@ -833,11 +821,15 @@ mod tests {
 
     #[test]
     fn runs_returned_on_request() {
-        let r = record(
-            RecordBuilder::new(1024)
-                .data_nonresident("", 0, RUNS, 8192, 5000, 0, 0)
-                .data_nonresident("named", 0, &[0x11, 0x01, 0x20, 0x00], 4096, 4096, 0, 0),
-        );
+        let r = record(RecordBuilder::new(1024).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).data_nonresident(
+            "named",
+            0,
+            &[0x11, 0x01, 0x20, 0x00],
+            4096,
+            4096,
+            0,
+            0,
+        ));
         let info = parse_record(&r, 30, true).unwrap();
         assert_eq!(info.data_runs, vec![(0, vec![Run { lcn: Some(0x10), clusters: 2 }])]);
         let info = parse_record(&r, 30, false).unwrap();

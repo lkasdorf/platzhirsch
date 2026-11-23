@@ -1,0 +1,5 @@
+# The code was written by hand to about this width before it was formatted;
+# these two settings keep it close to that.
+max_width = 120
+# Calls, struct literals and `let ... else` stay on one line while they fit.
+use_small_heuristics = "Max"

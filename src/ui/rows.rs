@@ -129,10 +129,7 @@ impl TreeView {
     fn collapse_at(&mut self, at: usize) {
         let Row { node, depth } = self.rows[at];
         self.expanded[node as usize] = false;
-        let end = self.rows[at + 1..]
-            .iter()
-            .position(|r| r.depth <= depth)
-            .map_or(self.rows.len(), |i| at + 1 + i);
+        let end = self.rows[at + 1..].iter().position(|r| r.depth <= depth).map_or(self.rows.len(), |i| at + 1 + i);
         let sel = self.selected_row();
         if sel > at && sel < end {
             self.selected = node;
@@ -340,9 +337,7 @@ fn push_descendants(
 ) {
     let mut stack: Vec<(NodeId, u32)> = Vec::new();
     let mut push_kids = |stack: &mut Vec<(NodeId, u32)>, node: NodeId, depth: u32| {
-        let kids = sorted
-            .entry(node)
-            .or_insert_with(|| tree.sorted_children(node, key, desc));
+        let kids = sorted.entry(node).or_insert_with(|| tree.sorted_children(node, key, desc));
         stack.extend(kids.iter().rev().map(|&c| (c, depth + 1)));
     };
     push_kids(&mut stack, start, depth);
@@ -357,7 +352,7 @@ fn push_descendants(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TreeBuilder, F_DIR, NO_PARENT};
+    use crate::model::{F_DIR, NO_PARENT, TreeBuilder};
 
     fn sample() -> Tree {
         let mut b = TreeBuilder::with_capacity(8, 64);
@@ -382,10 +377,7 @@ mod tests {
         let mut v = TreeView::new(&t, Metric::Allocated);
         assert_eq!(v.selected, 0);
         assert!(v.sort() == (SortKey::Allocated, true));
-        assert_eq!(
-            v.rows(),
-            &[Row { node: 0, depth: 0 }, Row { node: 1, depth: 1 }, Row { node: 6, depth: 1 }]
-        );
+        assert_eq!(v.rows(), &[Row { node: 0, depth: 0 }, Row { node: 1, depth: 1 }, Row { node: 6, depth: 1 }]);
         v.toggle(&t, 1);
         assert_eq!(nodes(&v), vec![0, 1, 4, 2, 3, 6]);
         assert_eq!(v.rows()[2].depth, 2);

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The source is formatted with rustfmt. `rustfmt.toml` holds the settings: lines of up to
+  120 columns, as the code was written before. The program itself is unchanged.
+
 ### Fixed
 
 - Continuous integration: a run that GitHub starts late for a pull request that is already

@@ -107,18 +107,8 @@ const ALLOWED: &[(&str, &str, usize)] = &[
 
 /// Package-name prefixes of network libraries: a lock-file package whose name
 /// starts with one of these fails the test.
-const NETWORK_CRATE_PREFIXES: &[&str] = &[
-    "reqwest",
-    "hyper",
-    "ureq",
-    "curl",
-    "tungstenite",
-    "tokio-tungstenite",
-    "h2",
-    "native-tls",
-    "rustls",
-    "openssl",
-];
+const NETWORK_CRATE_PREFIXES: &[&str] =
+    &["reqwest", "hyper", "ureq", "curl", "tungstenite", "tokio-tungstenite", "h2", "native-tls", "rustls", "openssl"];
 
 /// Calls whose access mask (second argument) must be a named constant.
 const MASK_CALLS: &[&str] = &["NtOpenFile", "CreateFileW"];
@@ -200,7 +190,9 @@ fn allowlist_errors(allowed: &[(&str, &str, usize)], counts: &[usize]) -> Vec<St
         .iter()
         .zip(counts)
         .filter(|((_, _, want), got)| want != *got)
-        .map(|((file, line, want), got)| format!("allowlist entry {file}: `{line}` expected {want} time(s), found {got}"))
+        .map(|((file, line, want), got)| {
+            format!("allowlist entry {file}: `{line}` expected {want} time(s), found {got}")
+        })
         .collect()
 }
 
@@ -358,7 +350,8 @@ fn no_write_delete_or_network_calls_in_source() {
 
 #[test]
 fn no_network_features_in_manifest() {
-    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read Cargo.toml");
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("read Cargo.toml");
     assert!(manifest.contains("name = \"platzhirsch\""), "Cargo.toml looks wrong");
     let rules = Rules { substrings: BANNED_NETWORK, nocase: &[], words: &[] };
     let found = check("Cargo.toml", &manifest, &rules, &[], &mut []);
@@ -447,7 +440,9 @@ fn checker_flags_new_write_and_process_rules() {
     ] {
         assert!(hit(banned) >= 1, "not reported: {banned}");
     }
-    for fine in ["let n = v.reset_len(3);", "let n = v.set_length(3);", "let a = FILE_READ_ATTRIBUTES;", "let c = Cmd::now();"] {
+    for fine in
+        ["let n = v.reset_len(3);", "let n = v.set_length(3);", "let a = FILE_READ_ATTRIBUTES;", "let c = Cmd::now();"]
+    {
         assert_eq!(hit(fine), 0, "reported: {fine}");
     }
 }
@@ -505,7 +500,9 @@ fn numeric_access_mask_rule() {
     // Another function whose name only ends like this one is not meant.
     assert!(numeric_access_masks("src/x.rs", "MyNtOpenFile(&mut h, 5, &a)").is_empty());
     assert!(is_numeric_literal("0x80_10u32") && is_numeric_literal("12") && is_numeric_literal("0b101"));
-    assert!(!is_numeric_literal("FILE_LIST_DIRECTORY.0") && !is_numeric_literal("access.0") && !is_numeric_literal("0xZZ"));
+    assert!(
+        !is_numeric_literal("FILE_LIST_DIRECTORY.0") && !is_numeric_literal("access.0") && !is_numeric_literal("0xZZ")
+    );
 }
 
 #[test]
@@ -566,7 +563,10 @@ fn checker_flags_raw_open_options_and_device_control() {
         ("let f = OpenOptions::new().access_mode(0x4000_0000).open(p)?;", ".access_mode("),
         ("let f = OpenOptions::new().read(true).custom_flags(0x0400_0000).open(p)?;", ".custom_flags("),
         ("let access = MAXIMUM_ALLOWED;", "MAXIMUM_ALLOWED"),
-        ("let s = unsafe { NtFsControlFile(h, None, None, None, &mut io, code, None, 0, None, 0) };", "NtFsControlFile"),
+        (
+            "let s = unsafe { NtFsControlFile(h, None, None, None, &mut io, code, None, 0, None, 0) };",
+            "NtFsControlFile",
+        ),
         ("let options = FILE_DELETE_ON_CLOSE.0;", "FILE_DELETE_ON_CLOSE"),
     ] {
         assert_eq!(hit(banned), [format!("src/x.rs:1: `{word}`")], "{banned}");
@@ -597,8 +597,7 @@ fn network_crate_prefixes_in_lock_text() {
 
 #[test]
 fn no_network_crates_in_lockfile() {
-    let lock = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"))
-        .expect("read Cargo.lock");
+    let lock = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock")).expect("read Cargo.lock");
     assert!(lock.contains("name = \"platzhirsch\""), "Cargo.lock looks wrong");
     let found = network_crates(&lock);
     assert!(found.is_empty(), "network crate(s) in Cargo.lock: {found:?}");

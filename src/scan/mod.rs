@@ -89,7 +89,10 @@ pub enum ScanError {
     /// The walk root is a cloud folder that is not available locally.
     OnlineOnly,
     NotNtfs,
-    MftIncomplete { found_bytes: u64, expected_bytes: u64 },
+    MftIncomplete {
+        found_bytes: u64,
+        expected_bytes: u64,
+    },
     Io(std::io::Error),
     Ntfs(NtfsError),
 }
@@ -124,15 +127,13 @@ impl fmt::Display for ScanError {
             ScanError::Cancelled => write!(f, "Scan cancelled"),
             ScanError::AccessDenied => write!(f, "Access denied (administrator rights required)"),
             ScanError::FolderAccessDenied => write!(f, "Access denied"),
-            ScanError::OnlineOnly => write!(
-                f,
-                "This folder is online-only; open it once in Explorer to make it available, then scan again."
-            ),
+            ScanError::OnlineOnly => {
+                write!(f, "This folder is online-only; open it once in Explorer to make it available, then scan again.")
+            }
             ScanError::NotNtfs => write!(f, "Not an NTFS volume"),
-            ScanError::MftIncomplete { found_bytes, expected_bytes } => write!(
-                f,
-                "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
-            ),
+            ScanError::MftIncomplete { found_bytes, expected_bytes } => {
+                write!(f, "MFT incomplete: found {found_bytes} of {expected_bytes} bytes")
+            }
             ScanError::Io(e) => write!(f, "Read error: {}", io_error_text(e)),
             ScanError::Ntfs(e) => {
                 let detail = match e {
@@ -177,16 +178,9 @@ mod tests {
         for root in [r"\\?\C:\", r"\\?\c:", r"\\?\D:/"] {
             assert!(matches!(target(root), ScanTarget::Volume('C' | 'D')), "{root}");
         }
-        for folder in [
-            r"C:\Data",
-            r"C:\\",
-            r"\\nas\share",
-            r"\\?\C:\Data",
-            r"\\?\UNC\server\share",
-            r"\\?\\C:\",
-            "1:",
-            "src",
-        ] {
+        for folder in
+            [r"C:\Data", r"C:\\", r"\\nas\share", r"\\?\C:\Data", r"\\?\UNC\server\share", r"\\?\\C:\", "1:", "src"]
+        {
             assert!(matches!(target(folder), ScanTarget::Folder(ref p) if p.as_os_str() == folder), "{folder}");
         }
     }

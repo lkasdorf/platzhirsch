@@ -30,9 +30,7 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<Run>, NtfsError> {
         }
         let body_start = pos + 1;
         let body_end = body_start + len_n + off_n; // at most 17 added, cannot overflow
-        let body = bytes
-            .get(body_start..body_end)
-            .ok_or(NtfsError::Truncated)?;
+        let body = bytes.get(body_start..body_end).ok_or(NtfsError::Truncated)?;
         let (len_bytes, off_bytes) = body.split_at(len_n);
 
         let mut clusters = 0u64;
@@ -51,10 +49,8 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<Run>, NtfsError> {
                 raw |= u64::MAX << (8 * off_n); // sign-extend
             }
             let delta = raw as i64;
-            let next = prev_lcn
-                .checked_add(delta)
-                .filter(|v| *v >= 0)
-                .ok_or(NtfsError::Malformed("LCN out of range"))?;
+            let next =
+                prev_lcn.checked_add(delta).filter(|v| *v >= 0).ok_or(NtfsError::Malformed("LCN out of range"))?;
             prev_lcn = next;
             Some(next as u64)
         };
@@ -81,8 +77,7 @@ mod tests {
     fn multiple_runs_relative_offsets() {
         assert_eq!(
             decode_runs(&[
-                0x31, 0x38, 0x73, 0x25, 0x34, 0x32, 0x14, 0x01, 0xE5, 0x11, 0x02, 0x31, 0x42,
-                0xAA, 0x00, 0x03, 0x00
+                0x31, 0x38, 0x73, 0x25, 0x34, 0x32, 0x14, 0x01, 0xE5, 0x11, 0x02, 0x31, 0x42, 0xAA, 0x00, 0x03, 0x00
             ])
             .unwrap(),
             vec![
@@ -129,10 +124,7 @@ mod tests {
     fn ends_at_slice_end_or_terminator() {
         assert_eq!(decode_runs(&[]).unwrap(), vec![]);
         assert_eq!(decode_runs(&[0x00, 0x11, 0x01, 0x01]).unwrap(), vec![]);
-        assert_eq!(
-            decode_runs(&[0x11, 0x01, 0x10]).unwrap(),
-            vec![Run { lcn: Some(0x10), clusters: 1 }]
-        );
+        assert_eq!(decode_runs(&[0x11, 0x01, 0x10]).unwrap(), vec![Run { lcn: Some(0x10), clusters: 1 }]);
     }
 
     #[test]

@@ -13,9 +13,7 @@ use rayon::prelude::*;
 
 use super::ntfs::NtfsError;
 use super::ntfs::boot::{BootSector, parse_boot_sector};
-use super::ntfs::record::{
-    AttrListLoc, FIXUP_BLOCK_SIZE, apply_fixups, header_in_use, parse_attr_list, parse_record,
-};
+use super::ntfs::record::{AttrListLoc, FIXUP_BLOCK_SIZE, apply_fixups, header_in_use, parse_attr_list, parse_record};
 use super::ntfs::runs::Run;
 use super::{Progress, ScanError, ScanMethod, ScanResult};
 use crate::model::{F_DIR, F_LINK, NO_PARENT, NodeId, TreeBuilder};
@@ -390,11 +388,8 @@ fn parse_slot(rec: &mut [u8], record_no: u64) -> (Slot, Option<String>) {
         }
         None => (NO_RECORD, None),
     };
-    let (kind, base) = if info.is_extension {
-        (KIND_EXT, record_ref(info.base_record))
-    } else {
-        (KIND_BASE, NO_RECORD)
-    };
+    let (kind, base) =
+        if info.is_extension { (KIND_EXT, record_ref(info.base_record)) } else { (KIND_BASE, NO_RECORD) };
     let slot = Slot {
         size: info.size.unwrap_or(0),
         allocated: info.allocated,
@@ -448,11 +443,8 @@ fn read_slots<R: VolumeReader>(
                 return Err(ScanError::Cancelled);
             }
             let (first, mut buf) = msg?;
-            let parsed: Vec<(Slot, Option<String>)> = buf
-                .par_chunks_mut(rs)
-                .enumerate()
-                .map(|(i, rec)| parse_slot(rec, first + i as u64))
-                .collect();
+            let parsed: Vec<(Slot, Option<String>)> =
+                buf.par_chunks_mut(rs).enumerate().map(|(i, rec)| parse_slot(rec, first + i as u64)).collect();
             let _ = free_tx.send(buf);
             for (mut slot, name) in parsed {
                 if let Some(name) = name {
@@ -480,7 +472,11 @@ fn read_slots<R: VolumeReader>(
 }
 
 /// Scans a whole NTFS volume through its MFT. The root gets `root_name`.
-pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Progress) -> Result<ScanResult, ScanError> {
+pub fn scan_mft_from<R: VolumeReader>(
+    r: &mut R,
+    root_name: &str,
+    progress: &Progress,
+) -> Result<ScanResult, ScanError> {
     let started = Instant::now();
     let mut boot_buf = vec![0u8; BOOT_READ_LEN];
     if r.read_at(0, &mut boot_buf).is_err() {
@@ -630,11 +626,7 @@ mod tests {
     /// Finds the MFT: record 0, plus the extension records its attribute list names.
     fn locate_mft<R: VolumeReader>(r: &mut R, boot: &BootSector) -> Result<MftLayout, ScanError> {
         let Located { map, byte_len } = locate_map(r, boot)?;
-        Ok(MftLayout {
-            runs: map.runs,
-            byte_len,
-            record_count: byte_len / u64::from(boot.record_size),
-        })
+        Ok(MftLayout { runs: map.runs, byte_len, record_count: byte_len / u64::from(boot.record_size) })
     }
 
     const MFT_START: u64 = 4 * 4096;
@@ -647,24 +639,56 @@ mod tests {
             1024,
             &[(4, 8)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, RecordBuilder::new(1024).dir().file_name(5, ".", 3).std_info(1).build(512)),
-                (8, RecordBuilder::new(1024).file_name(5, "$BadClus", 3).data_resident("", 0)
-                        .data_nonresident("$Bad", 0, &[0x01, 0x10, 0x00], 1 << 40, 1 << 40, 0, 0).build(512)),
+                (
+                    8,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$BadClus", 3)
+                        .data_resident("", 0)
+                        .data_nonresident("$Bad", 0, &[0x01, 0x10, 0x00], 1 << 40, 1 << 40, 0, 0)
+                        .build(512),
+                ),
                 (24, RecordBuilder::new(1024).dir().file_name(5, "docs", 1).std_info(100).build(512)),
-                (25, RecordBuilder::new(1024).file_name(24, "a.txt", 1).std_info(900)
-                        .data_nonresident("", 0, &[0x21, 0x02, 0x40, 0x00, 0x00], 8192, 5000, 0, 0).build(512)),
+                (
+                    25,
+                    RecordBuilder::new(1024)
+                        .file_name(24, "a.txt", 1)
+                        .std_info(900)
+                        .data_nonresident("", 0, &[0x21, 0x02, 0x40, 0x00, 0x00], 8192, 5000, 0, 0)
+                        .build(512),
+                ),
                 (26, RecordBuilder::new(1024).file_name(24, "tiny", 1).data_resident("", 100).build(512)),
                 (27, RecordBuilder::new(1024).file_name(5, "frag.bin", 1).build(512)),
-                (28, RecordBuilder::new(1024).base(27)
-                        .data_nonresident("", 0, &[0x21, 0x02, 0x50, 0x00, 0x00], 1_003_520, 1_000_000, 0, 0).build(512)),
-                (29, RecordBuilder::new(1024).file_name(5, "hl1", 1).file_name(24, "hl2", 1)
-                        .data_nonresident("", 0, &[0x21, 0x01, 0x60, 0x00, 0x00], 4096, 300, 0, 0).build(512)),
-                (30, RecordBuilder::new(1024).file_name(5, "wof.dll", 1)
+                (
+                    28,
+                    RecordBuilder::new(1024)
+                        .base(27)
+                        .data_nonresident("", 0, &[0x21, 0x02, 0x50, 0x00, 0x00], 1_003_520, 1_000_000, 0, 0)
+                        .build(512),
+                ),
+                (
+                    29,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "hl1", 1)
+                        .file_name(24, "hl2", 1)
+                        .data_nonresident("", 0, &[0x21, 0x01, 0x60, 0x00, 0x00], 4096, 300, 0, 0)
+                        .build(512),
+                ),
+                (
+                    30,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "wof.dll", 1)
                         .data_nonresident("", 0, &[0x01, 0x05, 0x00], 20480, 20000, 0x8000, 0)
                         .data_nonresident("WofCompressedData", 0, &[0x21, 0x02, 0x70, 0x00, 0x00], 8192, 7000, 0, 0)
-                        .build(512)),
+                        .build(512),
+                ),
                 (31, broken),
             ],
         )
@@ -702,8 +726,13 @@ mod tests {
     /// Scans a volume holding `$MFT` (record 0), the root (record 5) and `extra`.
     fn scan_records(extra: Vec<(u64, Vec<u8>)>) -> ScanResult {
         let mut records = vec![
-            (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                    .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+            (
+                0,
+                RecordBuilder::new(1024)
+                    .file_name(5, "$MFT", 3)
+                    .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0)
+                    .build(512),
+            ),
             (5, root_dir()),
         ];
         records.extend(extra);
@@ -785,9 +814,10 @@ mod tests {
     #[test]
     fn extension_record_with_invalid_base_is_skipped_once() {
         // record 20 is empty, so the extension belongs to no file
-        let r = scan_records(vec![
-            (21, RecordBuilder::new(1024).base(20).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
-        ]);
+        let r = scan_records(vec![(
+            21,
+            RecordBuilder::new(1024).base(20).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512),
+        )]);
         assert_eq!(r.skipped, 1);
         assert_eq!(r.tree.len(), 2);
     }
@@ -841,21 +871,28 @@ mod tests {
             1024,
             &[(4, 4), (40, 4)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .attr_list_resident(&[(0x80, 0, 0), (0x80, 4, 15)])
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
-                (15, RecordBuilder::new(1024).base(0)
-                        .data_nonresident("", 4, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0).build(512)),
+                (
+                    15,
+                    RecordBuilder::new(1024)
+                        .base(0)
+                        .data_nonresident("", 4, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0)
+                        .build(512),
+                ),
                 (20, RecordBuilder::new(1024).file_name(5, "far.txt", 1).data_resident("", 10).build(512)),
             ],
         );
         let boot = parse_boot_sector(&v.bytes[..512]).unwrap();
         let layout = locate_mft(&mut v, &boot).unwrap();
-        assert_eq!(
-            layout.runs,
-            vec![Run { lcn: Some(4), clusters: 4 }, Run { lcn: Some(40), clusters: 4 }]
-        );
+        assert_eq!(layout.runs, vec![Run { lcn: Some(4), clusters: 4 }, Run { lcn: Some(40), clusters: 4 }]);
         assert_eq!((layout.byte_len, layout.record_count), (32768, 32));
 
         let r = scan_mft_from(&mut v, "D:", &Progress::default()).unwrap();
@@ -871,15 +908,30 @@ mod tests {
             1024,
             &[(4, 4), (40, 4), (60, 4), (80, 4)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .attr_list_resident(&[(0x80, 0, 0), (0x80, 4, 15), (0x80, 8, 14), (0x80, 12, 15)])
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 65536, 65536, 0, 0).build(512)),
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 65536, 65536, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
-                (14, RecordBuilder::new(1024).base(0)
-                        .data_nonresident("", 8, &[0x11, 0x04, 0x3C, 0x00], 0, 0, 0, 0).build(512)),
-                (15, RecordBuilder::new(1024).base(0)
+                (
+                    14,
+                    RecordBuilder::new(1024)
+                        .base(0)
+                        .data_nonresident("", 8, &[0x11, 0x04, 0x3C, 0x00], 0, 0, 0, 0)
+                        .build(512),
+                ),
+                (
+                    15,
+                    RecordBuilder::new(1024)
+                        .base(0)
                         .data_nonresident("", 4, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0)
-                        .data_nonresident("", 12, &[0x11, 0x04, 0x50, 0x00], 0, 0, 0, 0).build(512)),
+                        .data_nonresident("", 12, &[0x11, 0x04, 0x50, 0x00], 0, 0, 0, 0)
+                        .build(512),
+                ),
                 (20, RecordBuilder::new(1024).file_name(5, "second.txt", 1).data_resident("", 2).build(512)),
                 (40, RecordBuilder::new(1024).file_name(5, "third.txt", 1).data_resident("", 3).build(512)),
                 (56, RecordBuilder::new(1024).file_name(5, "fourth.txt", 1).data_resident("", 4).build(512)),
@@ -912,12 +964,22 @@ mod tests {
             1024,
             &[(4, 4), (40, 4)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .attr_list_resident(&[(0x80, 0, 0), (0x80, 8, 15)])
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
-                (15, RecordBuilder::new(1024).base(0)
-                        .data_nonresident("", 8, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0).build(512)),
+                (
+                    15,
+                    RecordBuilder::new(1024)
+                        .base(0)
+                        .data_nonresident("", 8, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0)
+                        .build(512),
+                ),
             ],
         );
         assert!(matches!(
@@ -933,9 +995,14 @@ mod tests {
             1024,
             &[(4, 16)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .data_nonresident("", 0, &[0x11, 0x10, 0x04, 0x00], 65536, 65536, 0, 0)
-                        .initialized(32768).build(512)),
+                        .initialized(32768)
+                        .build(512),
+                ),
                 (5, root_dir()),
                 (20, RecordBuilder::new(1024).file_name(5, "live.txt", 1).data_resident("", 5).build(512)),
                 (40, RecordBuilder::new(1024).file_name(5, "stale.txt", 1).data_resident("", 7).build(512)),
@@ -974,8 +1041,13 @@ mod tests {
             1024,
             &[(8, 8)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
                 (20, RecordBuilder::new(1024).file_name(5, "big.txt", 1).data_resident("", 9).build(512)),
             ],
@@ -997,12 +1069,22 @@ mod tests {
             1024,
             &[(4, 4), (40, 4)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .attr_list_nonresident(&[0x11, 0x01, 0x1E, 0x00], 64)
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
-                (15, RecordBuilder::new(1024).base(0)
-                        .data_nonresident("", 4, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0).build(512)),
+                (
+                    15,
+                    RecordBuilder::new(1024)
+                        .base(0)
+                        .data_nonresident("", 4, &[0x11, 0x04, 0x28, 0x00], 0, 0, 0, 0)
+                        .build(512),
+                ),
                 (20, RecordBuilder::new(1024).file_name(5, "far.txt", 1).data_resident("", 10).build(512)),
             ],
         );
@@ -1032,8 +1114,13 @@ mod tests {
             1024,
             &[(4, 8)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                        .data_nonresident("", 0, &runs, huge, huge, 0, 0).build(512)),
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &runs, huge, huge, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
             ],
         );
@@ -1051,9 +1138,14 @@ mod tests {
             1024,
             &[(4, 8)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0)
-                        .initialized(0).build(512)),
+                        .initialized(0)
+                        .build(512),
+                ),
                 (5, root_dir()),
                 (20, RecordBuilder::new(1024).file_name(5, "a.txt", 1).data_resident("", 5).build(512)),
             ],
@@ -1071,13 +1163,20 @@ mod tests {
         // holding a named stream of 8192 allocated bytes
         let with_ext = |ext: bool| {
             let mut records = vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
             ];
             if ext {
-                records.push((16, RecordBuilder::new(1024).base(0)
-                        .data_nonresident("extra", 0, RUNS, 8192, 8192, 0, 0).build(512)));
+                records.push((
+                    16,
+                    RecordBuilder::new(1024).base(0).data_nonresident("extra", 0, RUNS, 8192, 8192, 0, 0).build(512),
+                ));
             }
             scan_mft_from(&mut fake_volume(1024, &[(4, 8)], records), "C:", &Progress::default()).unwrap()
         };
@@ -1097,8 +1196,13 @@ mod tests {
             1024,
             &[(4, 8)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
-                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 65536, 65536, 0, 0).build(512)),
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
+                        .data_nonresident("", 0, &[0x11, 0x08, 0x04, 0x00], 65536, 65536, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
             ],
         );
@@ -1136,7 +1240,10 @@ mod tests {
             let mut v = image();
             v.bytes[offset] = value;
             assert!(
-                matches!(scan_mft_from(&mut v, "C:", &Progress::default()), Err(ScanError::Ntfs(NtfsError::Malformed(_)))),
+                matches!(
+                    scan_mft_from(&mut v, "C:", &Progress::default()),
+                    Err(ScanError::Ntfs(NtfsError::Malformed(_)))
+                ),
                 "byte {offset:#x} = {value:#x}"
             );
         }
@@ -1149,14 +1256,20 @@ mod tests {
             let mut v = image();
             v.bytes[0x28..0x30].copy_from_slice(&total_sectors.to_le_bytes());
             assert!(
-                matches!(scan_mft_from(&mut v, "C:", &Progress::default()), Err(ScanError::Ntfs(NtfsError::Malformed(_)))),
+                matches!(
+                    scan_mft_from(&mut v, "C:", &Progress::default()),
+                    Err(ScanError::Ntfs(NtfsError::Malformed(_)))
+                ),
                 "{total_sectors} sectors"
             );
         }
         // The MFT must also end inside the volume: it ends at byte 49152 = sector 96.
         let mut v = image();
         v.bytes[0x28..0x30].copy_from_slice(&95u64.to_le_bytes());
-        assert!(matches!(scan_mft_from(&mut v, "C:", &Progress::default()), Err(ScanError::Ntfs(NtfsError::Malformed(_)))));
+        assert!(matches!(
+            scan_mft_from(&mut v, "C:", &Progress::default()),
+            Err(ScanError::Ntfs(NtfsError::Malformed(_)))
+        ));
         let mut v = image();
         v.bytes[0x28..0x30].copy_from_slice(&96u64.to_le_bytes());
         assert!(scan_mft_from(&mut v, "C:", &Progress::default()).is_ok());
@@ -1169,9 +1282,14 @@ mod tests {
             1024,
             &[(4, 4), (40, 4)],
             vec![
-                (0, RecordBuilder::new(1024).file_name(5, "$MFT", 3)
+                (
+                    0,
+                    RecordBuilder::new(1024)
+                        .file_name(5, "$MFT", 3)
                         .attr_list_resident(&[(0x80, 0, 0), (0x80, 4, 20), (0x80, 4, 20)])
-                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0).build(512)),
+                        .data_nonresident("", 0, &[0x11, 0x04, 0x04, 0x00], 32768, 32768, 0, 0)
+                        .build(512),
+                ),
                 (5, root_dir()),
             ],
         );
