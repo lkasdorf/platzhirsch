@@ -90,6 +90,9 @@ cargo test
 
 The tests run without administrator rights.
 
+The source is formatted with rustfmt; `rustfmt.toml` holds the settings. Run `cargo fmt`
+before a commit.
+
 ## Use
 
 Start `platzhirsch.exe`, choose a drive or a folder and press "Scan". For a whole NTFS
