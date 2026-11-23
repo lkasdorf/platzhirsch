@@ -40,9 +40,10 @@ See the [changelog](CHANGELOG.md) for what each version contains.
   for all columns, the table scrolls sideways.
 - **Treemap** of the folder selected in the table, coloured by level. Hover for path and
   size, click a tile to select it in the table, click the name strip at the top to go up
-  one folder (when the treemap is too small for that strip, use the table). Folders whose
-  content is too small to draw are darker. The divider can be dragged and the treemap can
-  be hidden.
+  one folder (when the treemap is too small for that strip, use the table). Space whose
+  content is too small to draw is darker: a whole folder, or the part of a folder beside
+  the entries it shows. The tooltip says how many entries are not drawn. The divider can
+  be dragged and the treemap can be hidden.
 - **A single .exe**, no installer, no runtime to install.
 
 ## What it never does
@@ -146,6 +147,10 @@ The design document and the implementation plan are in
   online-only folder can still make the provider fetch that folder's entry.
 - A symbolic link that was created as a file link but points to a folder is refused as a
   scan target with "Not a folder". Windows does not resolve such a link either.
+- The treemap draws at most 300,000 tiles, the largest folders and entries first. A
+  drive with 1.9 million entries stays well below that on a 4K screen; a folder with
+  millions of files of similar size on a large screen does not, and its rest is marked as
+  not drawn.
 - The program needs OpenGL 2 or newer. In some virtual machines and remote sessions it
   cannot start and says so.
 - Screen readers get the names of all controls and of each table row through the Windows
