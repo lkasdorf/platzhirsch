@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Folder table: in a very long list the rows were drawn some points off, 5 points at the
+  end of two million expanded rows and more in longer lists, so the last row was cut off.
+  Rows are now placed exactly at any length; scroll bar, wheel and arrow keys work as in
+  a short list.
 - Continuous integration: a run that GitHub starts late for a pull request that is already
   merged no longer cancels the run on `main`.
 
