@@ -36,7 +36,8 @@ See the [changelog](CHANGELOG.md) for what each version contains.
   Links (junctions and symbolic links) are marked and never followed.
 - **Folder table** with a share bar per entry, sorting by any column, keyboard
   navigation, and "Show in Explorer" / "Copy path" on right-click. Only the visible rows
-  are drawn.
+  are drawn. The Name column follows the window's width; when the window is too narrow
+  for all columns, the table scrolls sideways.
 - **Treemap** of the folder selected in the table, coloured by level. Hover for path and
   size, click a tile to select it in the table, click the name strip at the top to go up
   one folder (when the treemap is too small for that strip, use the table). Folders whose
