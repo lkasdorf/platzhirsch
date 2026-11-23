@@ -206,7 +206,8 @@ impl App {
         let fs_name = volume_letter(&target)
             .and_then(|letter| self.volumes.iter().find(|v| v.letter == letter))
             .map_or("", |v| v.fs_name.as_str());
-        let choice = choose_method(&target, win::is_elevated(), fs_name);
+        let substituted = volume_letter(&target).is_some_and(win::is_subst_drive);
+        let choice = choose_method(&target, win::is_elevated(), fs_name, substituted);
         match (choice, volume_letter(&target)) {
             (MethodChoice::Mft, _) => self.start(ctx, ScanMethod::Mft, target),
             (MethodChoice::AskElevation, Some(letter)) => self.ask_elevation(letter),

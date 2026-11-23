@@ -49,9 +49,12 @@ pub enum MethodChoice {
 }
 
 /// Picks the scan method: the MFT for whole NTFS volumes, the walk otherwise.
-pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str) -> MethodChoice {
+/// A `subst` drive (`substituted`) is a folder under a drive letter: it has no
+/// MFT of its own, whatever file system it reports.
+pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str, substituted: bool) -> MethodChoice {
     match target {
         ScanTarget::Folder(_) => MethodChoice::Walk,
+        ScanTarget::Volume(_) if substituted => MethodChoice::Walk,
         ScanTarget::Volume(_) if !fs_name.eq_ignore_ascii_case("NTFS") => MethodChoice::Walk,
         ScanTarget::Volume(_) if elevated => MethodChoice::Mft,
         ScanTarget::Volume(_) => MethodChoice::AskElevation,
@@ -152,13 +155,16 @@ mod tests {
     fn method_choice() {
         let vol = ScanTarget::Volume('C');
         let dir = ScanTarget::Folder("C:\\Data".into());
-        assert_eq!(choose_method(&vol, true, "NTFS"), MethodChoice::Mft);
-        assert_eq!(choose_method(&vol, false, "NTFS"), MethodChoice::AskElevation);
-        assert_eq!(choose_method(&vol, true, "exFAT"), MethodChoice::Walk);
-        assert_eq!(choose_method(&vol, false, "FAT32"), MethodChoice::Walk);
-        assert_eq!(choose_method(&dir, true, "NTFS"), MethodChoice::Walk);
-        assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, ""), MethodChoice::Walk);
-        assert_eq!(choose_method(&vol, true, "ntfs"), MethodChoice::Mft);
+        assert_eq!(choose_method(&vol, true, "NTFS", false), MethodChoice::Mft);
+        assert_eq!(choose_method(&vol, false, "NTFS", false), MethodChoice::AskElevation);
+        assert_eq!(choose_method(&vol, true, "exFAT", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, false, "FAT32", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&dir, true, "NTFS", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, "", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, true, "ntfs", false), MethodChoice::Mft);
+        // A `subst` drive reports the file system of its folder, but has no MFT.
+        assert_eq!(choose_method(&vol, true, "NTFS", true), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, false, "NTFS", true), MethodChoice::Walk);
     }
 
     #[test]

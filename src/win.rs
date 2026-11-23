@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, MAX_PATH, SYSTEM
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
-    GetLongPathNameW, GetVolumeInformationW,
+    GetLongPathNameW, GetVolumeInformationW, QueryDosDeviceW,
 };
 use windows::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode, THREAD_ERROR_MODE};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -97,6 +97,28 @@ pub fn volume_info(letter: char) -> Option<VolumeInfo> {
         total,
         free,
     })
+}
+
+/// True if the DOS device a drive letter stands for is a path, as `subst`
+/// makes it (`\??\C:\Data`), and not a volume (`\Device\HarddiskVolume3`).
+fn is_subst_target(device: &str) -> bool {
+    device.starts_with(r"\??\")
+}
+
+/// True if drive `letter` was made with `subst`: a folder under a drive
+/// letter. Only the name of the drive's device is read; false if it has none.
+pub fn is_subst_drive(letter: char) -> bool {
+    if !letter.is_ascii_alphabetic() {
+        return false;
+    }
+    let name = HSTRING::from(format!("{}:", letter.to_ascii_uppercase()));
+    // A `subst` target is `\??\` plus a path, so it can be long.
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `name` is NUL-terminated and outlives the call; `buf` is writable and the binding passes its length.
+    let n = unsafe { QueryDosDeviceW(&name, Some(&mut buf)) } as usize;
+    // The buffer holds a list of NUL-terminated strings; the first is the current target.
+    let first = buf[..n.min(buf.len())].split(|&c| c == 0).next().unwrap_or(&[]);
+    is_subst_target(&String::from_utf16_lossy(first))
 }
 
 /// The long form of `path` (8.3 short names expanded, letter case as stored).
@@ -433,6 +455,19 @@ mod tests {
     #[test]
     fn system_drive_is_listed_as_ntfs() {
         assert!(list_volumes().iter().any(|v| v.letter == 'C' && v.fs_name == "NTFS" && v.total > v.free));
+    }
+
+    #[test]
+    fn subst_drives_are_told_from_volumes_by_their_device() {
+        assert!(is_subst_target(r"\??\C:\Data"));
+        assert!(is_subst_target(r"\??\UNC\nas\share"));
+        assert!(!is_subst_target(r"\Device\HarddiskVolume3"));
+        assert!(!is_subst_target(r"\Device\LanmanRedirector\;Z:0\nas\share"));
+        assert!(!is_subst_target(""));
+        // The system drive is a volume; a letter without a drive and no letter at all are neither.
+        assert!(!is_subst_drive('C'));
+        assert!(!is_subst_drive('c'));
+        assert!(!is_subst_drive('1'));
     }
 
     #[test]

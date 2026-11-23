@@ -216,12 +216,11 @@ mod tests {
 
     #[test]
     fn a_failed_write_is_reported_in_english() {
-        // What `std::fs::write` returns for a folder that does not exist.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing").join("out.txt");
-        let e = std::fs::write(&path, "x").unwrap_err();
-        let path = path.to_string_lossy();
-        assert_eq!(write_failure(&path, &e), format!("error: could not write {path}: not found (OS error 3)"));
+        // What writing returns when the folder of the output file does not exist.
+        let e = std::io::Error::from_raw_os_error(3);
+        assert_eq!(write_failure(r"X:\missing\out.txt", &e), r"error: could not write X:\missing\out.txt: not found (OS error 3)");
+        let e = std::io::Error::from_raw_os_error(5);
+        assert_eq!(write_failure("out.txt", &e), "error: could not write out.txt: access denied (OS error 5)");
     }
 
     #[test]
