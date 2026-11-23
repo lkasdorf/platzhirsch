@@ -49,6 +49,11 @@ const ARROW_WIDTH: f32 = 14.0;
 const BAR_COLOR: Color32 = Color32::from_rgba_unmultiplied_const(240, 170, 50, 110);
 /// Id salt of the `TableBuilder`; the column resize handles derive their ids from it.
 const TABLE_SALT: &str = "tree_table";
+/// The Name column is never narrower than this.
+const NAME_MIN_WIDTH: f32 = 160.0;
+/// The width the columns after Name start with, and the least each can be given.
+const SIZE_COLUMNS: [(f32, f32); COLUMNS.len() - 1] =
+    [(90.0, 60.0), (90.0, 60.0), (80.0, 50.0), (70.0, 50.0), (85.0, 60.0), (90.0, 70.0)];
 /// Id salt of the scroll area that moves the table sideways.
 const SIDEWAYS_SALT: &str = "tree_table_sideways";
 /// The accessible name of the table.
@@ -202,6 +207,37 @@ fn text_cell(row: &mut TableRow<'_, '_>, ctx: &Context, text: Option<&str>) -> R
     rect
 }
 
+/// What the table keeps about its columns from one frame to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Widths {
+    /// The width each column had.
+    columns: [f32; COLUMNS.len()],
+    /// The width the Name column would have with room for it. It is shown at
+    /// `NAME_MIN_WIDTH` while this is less, and comes back when the window grows again.
+    name: f32,
+    /// The width the table had to fill.
+    available: f32,
+}
+
+impl Widths {
+    /// The widths for a table that has `available` to fill now, if they differ
+    /// from what the table would keep by itself: the Name column takes what the
+    /// window gained or lost, the other columns stay as they are.
+    fn for_window(mut self, available: f32) -> Option<Widths> {
+        // Set by hand since the last change of the window: that is the width it wants now.
+        if (self.columns[0] - self.name.max(NAME_MIN_WIDTH)).abs() > 0.5 {
+            self.name = self.columns[0];
+        }
+        if available == self.available {
+            return None;
+        }
+        self.name += available - self.available;
+        self.columns[0] = self.name.max(NAME_MIN_WIDTH);
+        self.available = available;
+        Some(self)
+    }
+}
+
 /// A small triangle showing the sort direction.
 fn sort_arrow(ui: &mut Ui, desc: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(8.0, 6.0), Sense::hover());
@@ -211,13 +247,22 @@ fn sort_arrow(ui: &mut Ui, desc: bool) {
 }
 
 /// One header cell; returns true when it was clicked, or activated with
-/// Space or Enter while it has the keyboard focus. For screen readers the
-/// cell is a button `Sort by {title}` that tells the sort direction.
-fn header_cell(header: &mut TableRow<'_, '_>, col: Col, index: usize, title: &str, sorted: Option<bool>) -> bool {
+/// Space or Enter while it has the keyboard focus, and the width of its
+/// column. For screen readers the cell is a button `Sort by {title}` that
+/// tells the sort direction.
+fn header_cell(
+    header: &mut TableRow<'_, '_>,
+    col: Col,
+    index: usize,
+    title: &str,
+    sorted: Option<bool>,
+) -> (bool, f32) {
     let mut clicked = false;
+    let mut width = 0.0;
     header.col(|ui| {
         let ctx = ui.ctx().clone();
         let rect = ui.max_rect();
+        width = rect.width();
         // Below the title, so the title does not take its clicks.
         let response = ui.interact(rect, header_id(index), Sense::click());
         let enabled = ui.is_enabled();
@@ -247,7 +292,7 @@ fn header_cell(header: &mut TableRow<'_, '_>, col: Col, index: usize, title: &st
         hide_from_screen_readers(&ctx, label.id);
         clicked = response.clicked();
     });
-    clicked
+    (clicked, width)
 }
 
 /// What the user did with the rows this frame; applied after drawing.
@@ -460,6 +505,14 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
     let mut input = RowInput::default();
     let focused = ctx.memory(|m| m.has_focus(table));
 
+    // The table keeps its column widths by itself, whatever the window does. When the
+    // window's width has changed, it is started anew with the Name column following it.
+    let widths_id = table.with("column_widths");
+    let available = ui.available_width();
+    let kept = ctx.data(|d| d.get_temp::<Widths>(widths_id));
+    let anew = kept.and_then(|w| w.for_window(available));
+    let mut seen = [0.0; COLUMNS.len()];
+
     {
         // Labels must not swallow the clicks that select rows.
         ui.style_mut().interaction.selectable_labels = false;
@@ -469,14 +522,17 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
             .resizable(true)
             // Clicks only: the cells are no Tab stops, the table is one.
             .sense(Sense::CLICK)
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::initial(80.0).at_least(50.0))
-            .column(Column::initial(70.0).at_least(50.0))
-            .column(Column::initial(85.0).at_least(60.0))
-            .column(Column::initial(90.0).at_least(70.0));
+            .cell_layout(Layout::left_to_right(Align::Center));
+        // At first the Name column fills what the others leave.
+        let name = anew.map_or_else(Column::remainder, |w| Column::initial(w.columns[0]));
+        builder = builder.column(name.at_least(NAME_MIN_WIDTH).clip(true));
+        for (i, (initial, least)) in SIZE_COLUMNS.into_iter().enumerate() {
+            let width = anew.map_or(initial, |w| w.columns[i + 1]);
+            builder = builder.column(Column::initial(width).at_least(least));
+        }
+        if anew.is_some() {
+            builder.reset();
+        }
         if let Some(row) = scroll_to {
             builder = builder.scroll_to_row(row, None);
         }
@@ -488,7 +544,9 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
             .header(row_height, |mut header| {
                 for (index, (col, title)) in COLUMNS.into_iter().enumerate() {
                     let sorted = (col == shown).then_some(desc);
-                    if header_cell(&mut header, col, index, title, sorted) {
+                    let (clicked, width) = header_cell(&mut header, col, index, title, sorted);
+                    seen[index] = width;
+                    if clicked {
                         header_click = Some(col);
                     }
                 }
@@ -607,6 +665,8 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
             hide_from_screen_readers(&ctx, handle);
         }
     }
+    let name = anew.or(kept).map_or(seen[0], |w| w.name);
+    ctx.data_mut(|d| d.insert_temp(widths_id, Widths { columns: seen, name, available }));
 
     // While the table has the focus, screen readers are on the selected row.
     if let Some((item, _)) = input.selected_item {
@@ -767,6 +827,23 @@ mod tests {
         assert_eq!(indent_width(70_000, 300.0), 120.0);
         assert_eq!(indent_width(u32::MAX, 160.0), 64.0);
         assert_eq!(indent_width(5, -1.0), 0.0);
+    }
+
+    #[test]
+    fn name_width_takes_what_the_window_gains_or_loses() {
+        let columns = [331.0, 90.0, 90.0, 80.0, 70.0, 85.0, 90.0];
+        let kept = Widths { columns, name: 331.0, available: 884.0 };
+        assert_eq!(kept.for_window(884.0), None);
+        let wider = kept.for_window(1184.0).unwrap();
+        assert_eq!((wider.columns[0], wider.name, wider.available), (631.0, 631.0, 1184.0));
+        assert_eq!(wider.columns[1..], columns[1..]);
+        // Below the minimum the wanted width is kept, so the column comes back as it was.
+        let narrow = kept.for_window(584.0).unwrap();
+        assert_eq!((narrow.columns[0], narrow.name), (NAME_MIN_WIDTH, 31.0));
+        assert_eq!(narrow.for_window(884.0).unwrap().columns[0], 331.0);
+        // Dragged to 200 while it was held at the minimum: 200 is what it wants now.
+        let dragged = Widths { columns: [200.0, 90.0, 90.0, 80.0, 70.0, 85.0, 90.0], ..narrow };
+        assert_eq!(dragged.for_window(684.0).unwrap().columns[0], 300.0);
     }
 
     // Headless tests of `show`: egui_kittest drives a plain `egui::Context`
@@ -1281,6 +1358,74 @@ mod tests {
             press(&mut h, Key::ArrowDown);
             assert_eq!(h.state().view.selected, 1);
             assert!(last_header(&h).max <= 500.0, "moving the selection does not scroll back");
+        }
+
+        /// The width of the Name column.
+        fn name_width(h: &Harness<'_, State>) -> f32 {
+            h.get_by_label("Sort by Name").rect().width()
+        }
+
+        fn set_width(h: &mut Harness<'_, State>, width: f32) {
+            h.set_size(vec2(width, 400.0));
+            h.run();
+        }
+
+        fn assert_close(actual: f32, expected: f32, what: &str) {
+            assert!((actual - expected).abs() < 0.5, "{what}: {actual}, expected {expected}");
+        }
+
+        #[test]
+        fn name_column_follows_the_window_width() {
+            let mut h = harness();
+            let (name, end) = (name_width(&h), last_header(&h).max);
+            assert_close(end, 892.0, "the columns fill the window");
+            // Wider: the Name column takes the new space, nothing is left empty.
+            set_width(&mut h, 1200.0);
+            assert_close(name_width(&h), name + 300.0, "Name at 1200");
+            assert_close(last_header(&h).max, end + 300.0, "last column at 1200");
+            set_width(&mut h, 900.0);
+            assert_close(name_width(&h), name, "Name back at 900");
+            // Too narrow for all columns: Name stops at its minimum, the rest scrolls.
+            set_width(&mut h, 600.0);
+            assert_close(name_width(&h), NAME_MIN_WIDTH, "Name at 600");
+            assert!(last_header(&h).max > 600.0);
+            set_width(&mut h, 900.0);
+            assert_close(name_width(&h), name, "Name back at 900 again");
+        }
+
+        #[test]
+        fn name_width_set_by_hand_follows_the_window_too() {
+            let mut h = harness();
+            let name = name_width(&h);
+            drag_name_column(&mut h, -100.0);
+            assert_close(name_width(&h), name - 100.0, "Name after the drag");
+            set_width(&mut h, 1000.0);
+            assert_close(name_width(&h), name, "Name at 1000");
+            // The other columns keep the widths they have.
+            assert_close(h.get_by_label("Sort by Allocated").rect().width(), 90.0, "Allocated");
+            // And it can still be set by hand afterwards.
+            drag_name_column(&mut h, -50.0);
+            assert_close(name_width(&h), name - 50.0, "Name after the second drag");
+        }
+
+        #[test]
+        fn rows_scroll_bar_stays_in_view_when_the_columns_are_wider_than_the_window() {
+            let mut h = long_list();
+            h.set_size(vec2(500.0, 300.0));
+            h.run();
+            assert!(last_header(&h).max > 500.0, "the last column does not fit");
+            assert!(h.query_by_label("f000").is_some());
+            // The bar's lane, at the right edge of what is on screen.
+            let lane = egui::pos2(500.0 - 12.0, 250.0);
+            h.hover_at(lane);
+            h.run_steps(10);
+            h.drag_at(lane);
+            h.run_steps(3);
+            h.drop_at(lane);
+            h.run_steps(5);
+            assert!(h.query_by_label("f000").is_none(), "the rows have moved");
+            // The selection has not: the press went to the bar, not to a row.
+            assert_eq!(h.state().view.selected_row(), 200);
         }
 
         #[test]
