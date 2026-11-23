@@ -18,7 +18,7 @@ use super::rows::TreeView;
 use super::table::full_path;
 use crate::format::{format_bytes, format_count};
 use crate::model::{Metric, NodeId, Tree};
-use crate::treemap::{self, HEADER_PT, Tile, header_strip, hit_index, hit_test, layout};
+use crate::treemap::{self, HEADER_PT, MAX_TILES, Tile, body, header_strip, hit_index, hit_test, layout};
 
 /// Tile colours per level for the light theme: own palette, 8 steps.
 const LIGHT: [Color32; 8] = [
@@ -42,8 +42,9 @@ const DARK: [Color32; 8] = [
     Color32::from_rgb(36, 104, 100),
     Color32::from_rgb(100, 88, 62),
 ];
-/// Folders whose content is too small to draw keep this share of their
-/// level colour's brightness.
+/// Where content is not drawn (a whole folder, or the rest of one that shows
+/// only some of its entries) the level colour keeps this share of its
+/// brightness.
 const ELIDED_SHADE: f32 = 0.65;
 /// Thinner tiles (in points) get no outline: it would cover the whole tile.
 const OUTLINE_MIN_PT: f32 = 3.0;
@@ -108,6 +109,19 @@ pub struct TreemapCache {
     mesh_builds: u32,
     /// The selected node, the computation, and the index of its tile.
     selected: Option<(NodeId, u32, Option<usize>)>,
+    /// The index of a tile, the computation, and what that tile leaves out.
+    left_out: Option<(usize, u32, Option<LeftOut>)>,
+}
+
+/// What a folder tile does not draw: how many entries (those in folders that
+/// are left out included), and their value in the layout's metric.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LeftOut {
+    entries: u64,
+    /// `None` for a folder that draws nothing: it is the folder's own value.
+    bytes: Option<u64>,
+    /// Left out by the limit on the number of tiles, not only for their size.
+    capped: bool,
 }
 
 impl TreemapCache {
@@ -196,6 +210,47 @@ impl TreemapCache {
             }
         }
     }
+
+    /// What the tile at index `at` leaves out; worked out once per tile and layout.
+    fn left_out(&mut self, tree: &Tree, at: usize) -> Option<LeftOut> {
+        match self.left_out {
+            Some((a, c, found)) if a == at && c == self.computations => found,
+            _ => {
+                let found = self.key.and_then(|(_, metric, _, _)| left_out(tree, &self.tiles, at, metric));
+                self.left_out = Some((at, self.computations, found));
+                found
+            }
+        }
+    }
+}
+
+/// What the tile at index `at` of `tiles` leaves out, `None` if it draws all
+/// it has. A folder that draws nothing leaves out every entry in it. One that
+/// draws some of its entries leaves out the others of non-zero value, each
+/// with all that is in it.
+fn left_out(tree: &Tree, tiles: &[Tile], at: usize, metric: Metric) -> Option<LeftOut> {
+    let tile = tiles.get(at)?;
+    let within = |node| 1 + u64::from(tree.file_count(node)) + u64::from(tree.dir_count(node));
+    if tile.elided {
+        return Some(LeftOut { entries: within(tile.node) - 1, bytes: None, capped: tile.capped });
+    }
+    if !tile.partial {
+        return None;
+    }
+    let (mut entries, mut bytes) = (0u64, 0u64);
+    for &child in tree.children(tile.node) {
+        let value = tree.metric(child, metric);
+        if value > 0 {
+            entries += within(child);
+            bytes = bytes.saturating_add(value);
+        }
+    }
+    // A folder's children come after it; take off those that have a tile.
+    for drawn in tiles[at + 1..].iter().filter(|t| tree.parent(t.node) == Some(tile.node)) {
+        entries = entries.saturating_sub(within(drawn.node));
+        bytes = bytes.saturating_sub(tree.metric(drawn.node, metric));
+    }
+    Some(LeftOut { entries, bytes: Some(bytes), capped: tile.capped })
 }
 
 /// Fill colour of a tile at `depth`: own palette of 8 steps, then it repeats.
@@ -225,9 +280,11 @@ fn outline_color(fill: Color32, dark: bool) -> Color32 {
 
 /// The fills and outlines of all tiles as one mesh in screen coordinates.
 /// An outlined tile is two rectangles, the outline colour and the fill inset
-/// by the outline width; a thinner tile is one rectangle. Four vertices and
-/// two triangles per rectangle, so the vertex count stays far below the
-/// `u32` index range.
+/// by the outline width; a thinner tile is one rectangle. A folder that draws
+/// only some of its entries has one more: its body in the darker shade, which
+/// shows wherever no child covers it. Four vertices and two triangles per
+/// rectangle, so with at most [`MAX_TILES`] tiles the vertex count stays far
+/// below the `u32` index range.
 fn build_mesh(tiles: &[Tile], map: Mapping, dark: bool) -> Mesh {
     let mut mesh = Mesh::default();
     mesh.reserve_vertices(tiles.len() * 8);
@@ -241,14 +298,24 @@ fn build_mesh(tiles: &[Tile], map: Mapping, dark: bool) -> Mesh {
         } else {
             mesh.add_colored_rect(rect, fill);
         }
+        if tile.partial {
+            // Children come later in `tiles` and are drawn over this.
+            mesh.add_colored_rect(map.to_screen(body(tile)), scaled(depth_color(tile.depth, dark), ELIDED_SHADE));
+        }
     }
     mesh
 }
 
-/// The tooltip line of a folder whose `n` entries are too small to draw.
-fn too_small_text(n: u64) -> String {
-    let noun = if n == 1 { "entry" } else { "entries" };
-    format!("{} {noun} too small to draw", format_count(n))
+/// The tooltip line of a folder for the entries it does not draw.
+fn left_out_text(left: LeftOut) -> String {
+    let noun = if left.entries == 1 { "entry" } else { "entries" };
+    let size = left.bytes.map(|b| format!(" ({})", format_bytes(b))).unwrap_or_default();
+    let why = if left.capped {
+        format!("not drawn (limit of {} tiles)", format_count(MAX_TILES as u64))
+    } else {
+        "too small to draw".to_string()
+    };
+    format!("{} {noun}{size} {why}", format_count(left.entries))
 }
 
 /// The folder the treemap shows: the selection, or a selected file's parent.
@@ -303,6 +370,10 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
     let painter = ui.painter_at(area);
     painter.add(Shape::mesh(cache.mesh(map, dark)));
     let selected_at = cache.tile_of(view.selected);
+    // The one hit test of this frame, in layout coordinates.
+    let pointer = response.hover_pos().map(|p| map.to_layout(p));
+    let hovered = pointer.and_then(|(x, y)| hit_index(cache.tiles(), x, y));
+    let left = hovered.and_then(|at| cache.left_out(tree, at));
     let tiles = cache.tiles();
 
     let text_color = if dark { Color32::from_gray(225) } else { Color32::from_gray(25) };
@@ -320,9 +391,6 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
         );
     }
 
-    // The one hit test of this frame, in layout coordinates.
-    let pointer = response.hover_pos().map(|p| map.to_layout(p));
-    let hovered = pointer.and_then(|(x, y)| hit_index(tiles, x, y));
     if let (Some(at), Some((x, y))) = (hovered, pointer) {
         let tile = &tiles[at];
         let strip = header_strip(tree, tile);
@@ -346,9 +414,8 @@ pub fn show(ui: &mut Ui, tree: &Tree, view: &TreeView, cache: &mut TreemapCache,
         response = response.on_hover_ui_at_pointer(|ui| {
             ui.label(tree.path(tile.node));
             ui.label(format_bytes(tree.metric(tile.node, metric)));
-            if tile.elided {
-                let n = u64::from(tree.file_count(tile.node)) + u64::from(tree.dir_count(tile.node));
-                ui.label(too_small_text(n));
+            if let Some(left) = left {
+                ui.label(left_out_text(left));
             }
             if go_up {
                 ui.label("Click to go up");
@@ -382,12 +449,105 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// One file of 200,000 bytes and 200,000 files of one byte under the root,
+    /// with a folder of three one-byte files and an empty file among them. On
+    /// a panel of 800 x 300 points only the big file gets a tile.
+    fn half_tiny() -> Tree {
+        let mut b = TreeBuilder::with_capacity(200_010, 64);
+        let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR); // 0
+        b.push("big.bin", root, 200_000, 200_000, 0, 0); // 1
+        let d = b.push("d", root, 0, 0, 0, F_DIR); // 2
+        for _ in 0..3 {
+            b.push("f", d, 1, 1, 0, 0);
+        }
+        b.push("empty", root, 0, 0, 0, 0);
+        for _ in 0..200_000 {
+            b.push("f", root, 1, 1, 0, 0);
+        }
+        b.finish(root).0
+    }
+
     #[test]
-    fn too_small_text_counts_in_singular_and_plural() {
-        assert_eq!(too_small_text(1), "1 entry too small to draw");
-        assert_eq!(too_small_text(0), "0 entries too small to draw");
-        assert_eq!(too_small_text(2), "2 entries too small to draw");
-        assert_eq!(too_small_text(1_683_667), "1,683,667 entries too small to draw");
+    fn left_out_text_counts_in_singular_and_plural() {
+        let text = |entries, bytes, capped| left_out_text(LeftOut { entries, bytes, capped });
+        assert_eq!(text(1, None, false), "1 entry too small to draw");
+        assert_eq!(text(0, None, false), "0 entries too small to draw");
+        assert_eq!(text(2, None, false), "2 entries too small to draw");
+        assert_eq!(text(1_683_667, None, false), "1,683,667 entries too small to draw");
+        assert_eq!(text(1_204, Some(2048), false), format!("1,204 entries ({}) too small to draw", format_bytes(2048)));
+        assert_eq!(text(1, Some(5), false), format!("1 entry ({}) too small to draw", format_bytes(5)));
+        assert_eq!(text(7, Some(5), true), format!("7 entries ({}) not drawn (limit of 300,000 tiles)", format_bytes(5)));
+        assert_eq!(text(7, None, true), "7 entries not drawn (limit of 300,000 tiles)");
+    }
+
+    #[test]
+    fn left_out_is_what_a_folder_does_not_draw() {
+        let bounds = treemap::Rect { x: 0.0, y: 0.0, w: 800.0, h: 300.0 };
+        // Some entries drawn: the others of non-zero value, folders with what is in them.
+        let t = half_tiny();
+        let tiles = layout(&t, 0, Metric::Size, bounds);
+        assert_eq!(tiles.len(), 2);
+        let want = LeftOut { entries: 200_000 + 1 + 3, bytes: Some(200_003), capped: false };
+        assert_eq!(left_out(&t, &tiles, 0, Metric::Size), Some(want));
+        // A file, and a folder that draws all it has, leave nothing out.
+        assert_eq!(left_out(&t, &tiles, 1, Metric::Size), None);
+        let s = sample();
+        let whole = layout(&s, 1, Metric::Size, bounds);
+        assert!((0..whole.len()).all(|at| left_out(&s, &whole, at, Metric::Size).is_none()));
+        assert_eq!(left_out(&s, &whole, whole.len(), Metric::Size), None);
+        // Nothing drawn: every entry in the folder, and no size of its own.
+        let none = layout(&t, 0, Metric::Size, treemap::Rect { x: 0.0, y: 0.0, w: 3.0, h: 3.0 });
+        assert_eq!(left_out(&t, &none, 0, Metric::Size), Some(LeftOut { entries: 200_006, bytes: None, capped: false }));
+        // Cut short by the limit: 100 files of 1..=100 bytes, tiles for the ten largest.
+        let mut b = TreeBuilder::with_capacity(101, 64);
+        let root = b.push("r", NO_PARENT, 0, 0, 0, F_DIR);
+        for size in 1..=100u64 {
+            b.push("f", root, size, size, 0, 0);
+        }
+        let t = b.finish(root).0;
+        let tiles = treemap::layout_with(&t, 0, Metric::Size, bounds, 0.0, 0.0, 11);
+        assert_eq!(left_out(&t, &tiles, 0, Metric::Size), Some(LeftOut { entries: 90, bytes: Some(4095), capped: true }));
+    }
+
+    #[test]
+    fn left_out_is_worked_out_once_per_tile_and_layout() {
+        let t = half_tiny();
+        let now = Instant::now();
+        let mut cache = TreemapCache::default();
+        cache.update(&t, 0, Metric::Size, 800.0, 300.0, now);
+        let first = cache.left_out(&t, 0);
+        assert_eq!(first.map(|l| l.entries), Some(200_004));
+        assert_eq!(cache.left_out(&t, 1), None);
+        assert_eq!(cache.left_out(&t, 0), first);
+        // The other metric is another layout; here it leaves out the same.
+        cache.update(&t, 0, Metric::Allocated, 800.0, 300.0, now);
+        assert_eq!(cache.left_out(&t, 0), first);
+        // Another folder at the same index.
+        cache.update(&t, 2, Metric::Size, 800.0, 300.0, now);
+        assert_eq!(cache.left_out(&t, 0), None);
+    }
+
+    #[test]
+    fn rest_of_a_partly_drawn_folder_is_darker_in_the_mesh() {
+        let t = half_tiny();
+        let mut cache = TreemapCache::default();
+        cache.update(&t, 0, Metric::Size, 800.0, 300.0, Instant::now());
+        let (folder, file) = (cache.tiles()[0], cache.tiles()[1]);
+        assert!(folder.partial && !folder.elided);
+        for dark in [false, true] {
+            let mesh = cache.mesh(Mapping { origin: Pos2::ZERO, scale: Vec2::splat(1.0) }, dark);
+            // The folder's outline and fill, its body, the file's outline and fill.
+            assert_eq!(mesh.vertices.len(), 20);
+            assert!(mesh.is_valid());
+            assert_eq!(mesh.vertices[4].color, depth_color(0, dark), "the folder keeps its colour");
+            let rest: Vec<Pos2> = mesh.vertices[8..12].iter().map(|v| v.pos).collect();
+            assert!(mesh.vertices[8..12].iter().all(|v| v.color == scaled(depth_color(0, dark), ELIDED_SHADE)));
+            let area = body(&folder);
+            assert_eq!(Rect::from_points(&rest), Rect::from_min_size(pos2(area.x, area.y), vec2(area.w, area.h)));
+            // The file is drawn after it, so the body shows only where the file is not.
+            assert_eq!(mesh.vertices[16].color, depth_color(1, dark));
+            assert!(file.rect.w * file.rect.h < 0.51 * area.w * area.h);
+        }
     }
 
     #[test]
@@ -406,7 +566,7 @@ mod tests {
 
     #[test]
     fn elided_tiles_are_visibly_darker_in_both_themes() {
-        let tile = |depth, elided| Tile { node: 0, rect: treemap::Rect { x: 0.0, y: 0.0, w: 9.0, h: 9.0 }, depth, elided };
+        let tile = |depth, elided| Tile { node: 0, rect: treemap::Rect { x: 0.0, y: 0.0, w: 9.0, h: 9.0 }, depth, elided, partial: false, capped: false };
         for dark in [false, true] {
             for d in 0..8u8 {
                 let (plain, shaded) = (tile_color(&tile(d, false), dark), tile_color(&tile(d, true), dark));
@@ -538,8 +698,11 @@ mod tests {
         let mesh = cache.mesh(map, false);
         let tiles = cache.tiles();
         let outlined = tiles.iter().filter(|x| x.rect.w.min(x.rect.h) >= OUTLINE_MIN_PT).count();
-        assert_eq!(mesh.vertices.len(), 4 * (tiles.len() + outlined));
-        assert_eq!(mesh.indices.len(), 6 * (tiles.len() + outlined));
+        // In the root `top.txt` is too thin for a tile, so the root's body is one more rectangle.
+        let partial = tiles.iter().filter(|x| x.partial).count();
+        assert_eq!(partial, 1);
+        assert_eq!(mesh.vertices.len(), 4 * (tiles.len() + outlined + partial));
+        assert_eq!(mesh.indices.len(), 6 * (tiles.len() + outlined + partial));
         assert!(mesh.is_valid());
         // The first rectangle is the root tile's outline, placed at the origin.
         assert_eq!(mesh.vertices[0].pos, pos2(10.0, 20.0));
@@ -624,9 +787,13 @@ mod tests {
                 b.push("f", a, 1 + (i * 7919) % 5_000, 0, 0, 0);
             }
             b.push("top.txt", root, 1, 0, 0, 0);
-            let tree = b.finish(root).0;
+            harness_of(b.finish(root).0, a)
+        }
+
+        /// `tree` with the folder `shown` selected.
+        fn harness_of(tree: Tree, shown: NodeId) -> Harness<'static, State> {
             let mut view = TreeView::new(&tree, Metric::Size);
-            view.reveal(&tree, a);
+            view.reveal(&tree, shown);
             let state = State { tree, view, cache: TreemapCache::default(), now: Instant::now(), clicked: None };
             Harness::builder()
                 .with_size(vec2(800.0, 300.0))
@@ -671,6 +838,31 @@ mod tests {
             h.run();
             assert!(h.query_by_role_and_label(Role::Image, "Treemap of C:\\").is_some());
             assert!(h.query_by_role_and_label(Role::Image, "Treemap of C:\\a").is_none());
+        }
+
+        #[test]
+        fn hovering_a_folder_says_what_it_does_not_draw() {
+            let mut h = harness_of(half_tiny(), 0);
+            h.run();
+            let line = left_out_text(LeftOut { entries: 200_004, bytes: Some(200_003), capped: false });
+            assert!(h.query_by_label(&line).is_none());
+            // The darker rest of the root, beside the big file's tile.
+            let file = h.state().cache.tiles()[1].rect;
+            assert!(file.x + file.w < 500.0, "{file:?}");
+            let at = origin(&h) + vec2(650.0, 150.0);
+            h.hover_at(at);
+            // Past the tooltip delay, in simulated time.
+            h.run_steps(20);
+            let path = h.state().tree.path(0);
+            assert!(h.query_by_label(&path).is_some(), "{path}");
+            assert!(h.query_by_label(&line).is_some());
+            // Over the file itself there is no such line.
+            let at = origin(&h) + vec2(file.x + file.w / 2.0, file.y + file.h / 2.0);
+            h.hover_at(at);
+            h.run_steps(20);
+            let path = h.state().tree.path(1);
+            assert!(h.query_by_label(&path).is_some(), "{path}");
+            assert!(h.query_by_label(&line).is_none());
         }
 
         #[test]

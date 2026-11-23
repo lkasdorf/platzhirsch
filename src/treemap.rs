@@ -2,8 +2,12 @@
 //!
 //! Pure geometry: turns one folder of the in-memory tree into nested
 //! rectangles and answers which rectangle lies under a point. Nothing in
-//! here recurses over tree depth; pending folders live on an explicit stack.
+//! here recurses over tree depth; pending folders wait in a queue, the one
+//! with the largest tile first.
 //! All lengths are in egui points (logical pixels), not physical pixels.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use crate::model::{Metric, NodeId, Tree};
 
@@ -24,6 +28,12 @@ pub struct Tile {
     /// all of them were below [`MIN_SIDE_PT`], or the folder's own tile was
     /// too small to subdivide.
     pub elided: bool,
+    /// A folder of whose children of non-zero value only some got a tile.
+    /// Where the others would be, its [`body`] shows no child.
+    pub partial: bool,
+    /// Children are missing (`elided` or `partial`) because the limit on the
+    /// number of tiles was reached, not only because they are too small.
+    pub capped: bool,
 }
 
 /// Tiles narrower or lower than this many points are not subdivided further.
@@ -38,16 +48,25 @@ pub const PAD_PT: f32 = 1.0;
 /// Tiles whose smaller side is below this many points are not emitted; their
 /// parent's area stays unsubdivided there.
 pub const MIN_SIDE_PT: f32 = 1.0;
+/// A layout has at most this many tiles: far more than a real drive needs on
+/// a large screen, and a bound on the time and memory of the rare tree with
+/// millions of entries of similar size.
+pub const MAX_TILES: usize = 300_000;
 
 pub fn layout(tree: &Tree, root: NodeId, metric: Metric, bounds: Rect) -> Vec<Tile> {
-    layout_with(tree, root, metric, bounds, HEADER_PT, PAD_PT)
+    layout_with(tree, root, metric, bounds, HEADER_PT, PAD_PT, MAX_TILES)
 }
 
 /// Squarified layout. Order: parents before children; the first tile is
 /// `root` itself (depth 0, all of `bounds`). Entries with value 0 get no tile,
 /// nor do entries whose tile would be thinner than [`MIN_SIDE_PT`]. A folder
 /// tile none of whose children of non-zero value got a tile is marked
-/// [`Tile::elided`].
+/// [`Tile::elided`], one of which only some did [`Tile::partial`].
+///
+/// At most `max_tiles` tiles are laid out (the tile of `root` always is).
+/// The folder with the largest tile is subdivided first, and in a folder the
+/// largest entries get their tiles first, so the limit leaves out the
+/// smallest. Folders it cuts short are marked [`Tile::capped`] as well.
 pub fn layout_with(
     tree: &Tree,
     root: NodeId,
@@ -55,8 +74,9 @@ pub fn layout_with(
     bounds: Rect,
     header_pt: f32,
     pad_pt: f32,
+    max_tiles: usize,
 ) -> Vec<Tile> {
-    let mut out = vec![Tile { node: root, rect: bounds, depth: 0, elided: false }];
+    let mut out = vec![Tile { node: root, rect: bounds, depth: 0, elided: false, partial: false, capped: false }];
     let finite = bounds.x.is_finite()
         && bounds.y.is_finite()
         && bounds.w.is_finite()
@@ -68,12 +88,21 @@ pub fn layout_with(
     let sane = |v: f32| if v.is_finite() { f64::from(v.max(0.0)) } else { 0.0 };
     let (header, pad) = (sane(header_pt), sane(pad_pt));
 
-    // Indices into `out` of the folder tiles still to subdivide.
-    let mut stack = vec![0usize];
+    // Indices into `out` of the folder tiles still to subdivide, the largest
+    // tile first.
+    let mut queue = BinaryHeap::new();
+    queue.push(queued(bounds, 0));
     let mut kids: Vec<(NodeId, u64)> = Vec::new();
-    while let Some(at) = stack.pop() {
+    while let Some((_, Reverse(at))) = queue.pop() {
         let p = out[at];
         if !tree.is_dir(p.node) {
+            continue;
+        }
+        if out.len() >= max_tiles {
+            // No tile left for any child: the folder stays whole.
+            let hides = has_valued_child(tree, p.node, metric);
+            out[at].elided = hides;
+            out[at].capped = hides;
             continue;
         }
         kids.clear();
@@ -88,29 +117,54 @@ pub fn layout_with(
         if kids.is_empty() {
             continue; // empty, or only entries of value 0: nothing is hidden
         }
-        let mut area = F64Rect {
-            x: f64::from(p.rect.x) + pad,
-            y: f64::from(p.rect.y) + pad,
-            w: f64::from(p.rect.w) - 2.0 * pad,
-            h: f64::from(p.rect.h) - 2.0 * pad,
-        };
-        if p.rect.w >= HEADER_MIN_W && p.rect.h >= HEADER_MIN_H {
-            area.y += header;
-            area.h -= header;
-        }
-        let placed = if p.rect.w < MIN_TILE_PT || p.rect.h < MIN_TILE_PT || !(area.w > 0.0 && area.h > 0.0) {
-            0
+        let area = body_of(p.rect, header, pad);
+        let (placed, capped) = if p.rect.w < MIN_TILE_PT || p.rect.h < MIN_TILE_PT || !(area.w > 0.0 && area.h > 0.0) {
+            (0, false)
         } else {
             kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            squarify(tree, &kids, total, area, p.depth.saturating_add(1), &mut out, &mut stack)
+            squarify(tree, &kids, total, area, p.depth.saturating_add(1), max_tiles, &mut out, &mut queue)
         };
         out[at].elided = placed == 0;
+        out[at].partial = placed > 0 && placed < kids.len();
+        out[at].capped = capped;
     }
     out
 }
 
 fn has_valued_child(tree: &Tree, node: NodeId, metric: Metric) -> bool {
     tree.is_dir(node) && tree.children(node).iter().any(|&c| tree.metric(c, metric) > 0)
+}
+
+/// The queue entry of the folder tile `rect` at index `at` of the output:
+/// the larger area comes first, among equal areas the earlier tile. The bits
+/// of a positive float order like its value.
+fn queued(rect: Rect, at: usize) -> (u32, Reverse<usize>) {
+    let area = rect.w * rect.h;
+    (if area.is_finite() && area > 0.0 { area.to_bits() } else { 0 }, Reverse(at))
+}
+
+/// The part of the folder tile `rect` its children are laid out in: the tile
+/// minus `pad` on every side and, where a header strip is reserved, minus
+/// `header` at the top.
+fn body_of(rect: Rect, header: f64, pad: f64) -> F64Rect {
+    let mut area = F64Rect {
+        x: f64::from(rect.x) + pad,
+        y: f64::from(rect.y) + pad,
+        w: f64::from(rect.w) - 2.0 * pad,
+        h: f64::from(rect.h) - 2.0 * pad,
+    };
+    if rect.w >= HEADER_MIN_W && rect.h >= HEADER_MIN_H {
+        area.y += header;
+        area.h -= header;
+    }
+    area
+}
+
+/// The part of a folder tile that [`layout`] places its children in. Where a
+/// [`Tile::partial`] folder shows no child there, entries are left out.
+pub fn body(tile: &Tile) -> Rect {
+    let r = body_of(tile.rect, f64::from(HEADER_PT), f64::from(PAD_PT));
+    Rect { x: r.x as f32, y: r.y as f32, w: r.w as f32, h: r.h as f32 }
 }
 
 /// The strip at the top of a folder tile that [`layout`] reserves for the
@@ -140,22 +194,26 @@ struct F64Rect {
 }
 
 /// Places `kids` (sorted by value, descending, all > 0) into `area` row by
-/// row. Every placed tile goes to `out`; folders are queued on `stack` by
-/// their index in `out`. Returns how many tiles were placed.
+/// row. Every placed tile goes to `out`; folders are put in `queue` by their
+/// index in `out`. Stops when `out` holds `max_tiles` tiles. Returns how many
+/// tiles were placed, and whether that limit kept a tile from being placed.
+#[allow(clippy::too_many_arguments)]
 fn squarify(
     tree: &Tree,
     kids: &[(NodeId, u64)],
     total: u128,
     area: F64Rect,
     depth: u8,
+    max_tiles: usize,
     out: &mut Vec<Tile>,
-    stack: &mut Vec<usize>,
-) -> usize {
+    queue: &mut BinaryHeap<(u32, Reverse<usize>)>,
+) -> (usize, bool) {
     let placed_before = out.len();
     let F64Rect { mut x, mut y, mut w, mut h } = area;
     let mut remaining = total;
     let mut i = 0;
-    while i < kids.len() && w > 0.0 && h > 0.0 {
+    let mut capped = false;
+    'rows: while i < kids.len() && w > 0.0 && h > 0.0 {
         // Every tile placed in the rest of the area is at most `min(w, h)`
         // across, so once that is below the cut-off no further tile is emitted.
         if w.min(h) < f64::from(MIN_SIDE_PT) {
@@ -214,10 +272,14 @@ fn squarify(
             if rect.w.is_nan() || rect.h.is_nan() || rect.w.min(rect.h) < MIN_SIDE_PT {
                 continue;
             }
-            if tree.is_dir(node) {
-                stack.push(out.len());
+            if out.len() >= max_tiles {
+                capped = true;
+                break 'rows;
             }
-            out.push(Tile { node, rect, depth, elided: false });
+            if tree.is_dir(node) {
+                queue.push(queued(rect, out.len()));
+            }
+            out.push(Tile { node, rect, depth, elided: false, partial: false, capped: false });
         }
 
         if wide {
@@ -230,7 +292,7 @@ fn squarify(
         remaining -= row_value;
         i = j;
     }
-    out.len() - placed_before
+    (out.len() - placed_before, capped)
 }
 
 /// The deepest tile under the point. Parents precede their children in
@@ -296,7 +358,7 @@ mod tests {
         let sizes = [6, 6, 4, 3, 2, 2, 1];
         let t = flat(&sizes);
         let b = rect(600.0, 400.0);
-        let tiles = layout_with(&t, 0, Metric::Size, b, 0.0, 0.0);
+        let tiles = layout_with(&t, 0, Metric::Size, b, 0.0, 0.0, MAX_TILES);
         assert_eq!(tiles.len(), 8);
         assert_eq!((tiles[0].node, tiles[0].depth, tiles[0].rect), (0, 0, b));
         let total = 600.0 * 400.0;
@@ -396,7 +458,7 @@ mod tests {
         let mut sizes = vec![1_000_000_000];
         sizes.extend(std::iter::repeat_n(1, 100_000));
         let t = flat(&sizes);
-        let tiles = layout_with(&t, 0, Metric::Size, rect(200.0, 100.0), 0.0, 0.0);
+        let tiles = layout_with(&t, 0, Metric::Size, rect(200.0, 100.0), 0.0, 0.0, MAX_TILES);
         assert!(tiles.iter().any(|x| x.node == 1), "the big file keeps its tile");
         assert!(tiles.len() < 100, "{} tiles", tiles.len());
         for tile in &tiles {
@@ -415,7 +477,7 @@ mod tests {
         b.push("f", DEPTH - 1, 1, 1, 0, 0);
         let (t, _) = b.finish(root);
         // No padding: every level keeps the full size, so the whole chain is laid out.
-        let tiles = layout_with(&t, root, Metric::Size, rect(1000.0, 1000.0), 0.0, 0.0);
+        let tiles = layout_with(&t, root, Metric::Size, rect(1000.0, 1000.0), 0.0, 0.0, MAX_TILES);
         assert_eq!(tiles.len(), DEPTH as usize + 1);
         assert_eq!(tiles.last().unwrap().depth, 255);
         assert!(tiles.iter().all(|x| !x.elided));
@@ -450,7 +512,7 @@ mod tests {
             assert!(!layout(t, 0, Metric::Size, rect(500.0, 500.0))[0].elided);
             assert!(!layout(t, 0, Metric::Size, rect(2.0, 2.0))[0].elided);
         }
-        // Everything fits: nothing is marked. Files are never marked.
+        // Every folder shows at least some of its content: none is marked. Files never are.
         let t = sample();
         let tiles = layout(&t, 0, Metric::Size, rect(800.0, 300.0));
         assert!(tiles.iter().all(|x| !x.elided), "{tiles:?}");
@@ -462,9 +524,125 @@ mod tests {
     }
 
     #[test]
+    fn folder_with_some_entries_too_small_is_partial() {
+        // Half the space in one file, half in 200,000 files far below 1 point each.
+        let mut sizes = vec![200_000];
+        sizes.extend(std::iter::repeat_n(1, 200_000));
+        let t = flat(&sizes);
+        let tiles = layout(&t, 0, Metric::Size, rect(800.0, 300.0));
+        assert_eq!(tiles.len(), 2, "the folder and the big file");
+        assert!(tiles[0].partial && !tiles[0].elided && !tiles[0].capped, "{:?}", tiles[0]);
+        assert!(!tiles[1].partial);
+        // The big file takes about half of the body; the rest of it shows no child.
+        let (file, all) = (tiles[1].rect, body(&tiles[0]));
+        let share = file.w * file.h / (all.w * all.h);
+        assert!((share - 0.5).abs() < 0.01, "{share}");
+        // Everything drawn: neither mark. Nothing drawn: elided, not partial.
+        let whole = layout(&sample(), 1, Metric::Size, rect(800.0, 300.0));
+        assert_eq!(whole.len(), 5);
+        assert!(whole.iter().all(|x| !x.partial && !x.elided && !x.capped), "{whole:?}");
+        // In the sample's root `top.txt` would be a strip below one point wide.
+        let root = layout(&sample(), 0, Metric::Size, rect(800.0, 300.0));
+        assert!(root[0].partial && root.iter().all(|x| x.node != 6));
+        let none = layout(&flat(&vec![1; 100_000]), 0, Metric::Size, rect(300.0, 200.0));
+        assert!(none[0].elided && !none[0].partial && !none[0].capped);
+    }
+
+    #[test]
+    fn body_is_where_the_children_are_laid_out() {
+        let t = sample();
+        let tile = |w, h| Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w, h }, depth: 1, elided: false, partial: false, capped: false };
+        // With a header strip, and too small for one.
+        for folder in [tile(100.0, 50.0), tile(HEADER_MIN_W - 1.0, 50.0), tile(100.0, HEADER_MIN_H - 1.0)] {
+            assert_eq!(body(&folder), content(folder.rect));
+            assert_eq!(header_strip(&t, &folder).is_some(), body(&folder).y > folder.rect.y + PAD_PT);
+        }
+    }
+
+    #[test]
+    fn the_tile_limit_keeps_the_largest_entries_of_a_folder() {
+        // 100 files of sizes 1..=100, all large enough for a tile.
+        let sizes: Vec<u64> = (1..=100).collect();
+        let t = flat(&sizes);
+        let all = layout_with(&t, 0, Metric::Size, rect(800.0, 600.0), 0.0, 0.0, MAX_TILES);
+        assert_eq!(all.len(), 101);
+        assert!(!all[0].partial && !all[0].capped);
+        let some = layout_with(&t, 0, Metric::Size, rect(800.0, 600.0), 0.0, 0.0, 11);
+        assert_eq!(some.len(), 11);
+        assert!(some[0].partial && some[0].capped && !some[0].elided, "{:?}", some[0]);
+        // Node `i` has size `i`: the ten tiles are the ten largest files, placed as without a limit.
+        let mut nodes: Vec<NodeId> = some[1..].iter().map(|x| x.node).collect();
+        nodes.sort_unstable();
+        assert_eq!(nodes, (91..=100).collect::<Vec<NodeId>>());
+        for tile in &some[1..] {
+            assert_eq!(Some(tile), all.iter().find(|x| x.node == tile.node));
+        }
+        // A limit that is exactly enough cuts nothing short.
+        let exact = layout_with(&t, 0, Metric::Size, rect(800.0, 600.0), 0.0, 0.0, 101);
+        assert_eq!(exact, all);
+        // The tile of the shown folder is always there.
+        for limit in [0, 1] {
+            let alone = layout_with(&t, 0, Metric::Size, rect(800.0, 600.0), 0.0, 0.0, limit);
+            assert_eq!(alone.len(), 1);
+            assert!(alone[0].elided && alone[0].capped && !alone[0].partial);
+        }
+    }
+
+    #[test]
+    fn the_tile_limit_subdivides_the_largest_folders_first() {
+        // Three folders of 50 equal files each; the folders hold 3/6, 2/6 and 1/6 of the space.
+        let mut b = TreeBuilder::with_capacity(160, 64);
+        let root = b.push("r", NO_PARENT, 0, 0, 0, F_DIR); // 0
+        let mut folders = Vec::new();
+        for size in [1u64, 3, 2] {
+            let d = b.push("d", root, 0, 0, 0, F_DIR);
+            for _ in 0..50 {
+                b.push("f", d, size, size, 0, 0);
+            }
+            folders.push(d);
+        }
+        let empty = b.push("empty", root, 0, 0, 0, F_DIR);
+        let t = b.finish(root).0;
+        let (small, large, middle) = (folders[0], folders[1], folders[2]);
+        let bounds = rect(900.0, 600.0);
+        let all = layout(&t, 0, Metric::Size, bounds);
+        assert_eq!(all.len(), 1 + 3 + 150);
+        assert!(all.iter().all(|x| !x.elided && !x.partial && !x.capped));
+
+        // Room for the three folders, all of the largest one and 20 files of the next.
+        let tiles = layout_with(&t, 0, Metric::Size, bounds, HEADER_PT, PAD_PT, 1 + 3 + 50 + 20);
+        assert_eq!(tiles.len(), 74);
+        let of = |node| *tiles.iter().find(|x| x.node == node).unwrap();
+        let drawn = |dir| tiles.iter().filter(|x| t.parent(x.node) == Some(dir)).count();
+        assert_eq!((drawn(large), drawn(middle), drawn(small)), (50, 20, 0));
+        assert!(!of(large).elided && !of(large).partial && !of(large).capped);
+        assert!(of(middle).partial && of(middle).capped && !of(middle).elided);
+        assert!(of(small).elided && of(small).capped && !of(small).partial);
+        // The root shows all its folders with content; the empty one hides nothing.
+        assert!(!tiles[0].elided && !tiles[0].partial && !tiles[0].capped);
+        assert!(tiles.iter().all(|x| x.node != empty));
+        // Parents still come before their children, so the deepest tile is the last one hit.
+        for (i, tile) in tiles.iter().enumerate().skip(1) {
+            let parent = t.parent(tile.node).unwrap();
+            assert!(tiles[..i].iter().any(|x| x.node == parent), "node {} before its parent", tile.node);
+        }
+        let file = tiles.iter().find(|x| t.parent(x.node) == Some(middle)).unwrap();
+        assert_eq!(hit_test(&tiles, file.rect.x + file.rect.w / 2.0, file.rect.y + file.rect.h / 2.0), Some(file.node));
+    }
+
+    #[test]
+    fn no_layout_has_more_tiles_than_the_limit() {
+        // 400,000 equal files on a panel where each would get a tile of 5 points².
+        let t = flat(&vec![1; 400_000]);
+        let tiles = layout(&t, 0, Metric::Size, rect(2000.0, 1000.0));
+        assert_eq!(tiles.len(), MAX_TILES);
+        assert!(tiles[0].partial && tiles[0].capped);
+    }
+
+    #[test]
     fn header_strip_only_on_large_folder_tiles() {
         let t = sample();
-        let folder = Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 }, depth: 1, elided: false };
+        let folder = Tile { node: 1, rect: Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 }, depth: 1, elided: false, partial: false, capped: false };
         assert_eq!(
             header_strip(&t, &folder),
             Some(Rect { x: 10.0 + PAD_PT, y: 20.0 + PAD_PT, w: 100.0 - 2.0 * PAD_PT, h: HEADER_PT })
