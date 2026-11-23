@@ -14,6 +14,8 @@ publish = false
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "accesskit", "clipboard"] }
 egui_extras = "0.37.0"
+# Only for the handle of the main window; eframe uses this crate already.
+raw-window-handle = "0.6.2"
 rayon = "1.12.0"
 rfd = "0.18.0"
 windows = { version = "0.62.2", features = [
