@@ -10,7 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # The runs of one pull request share a group, and so do the pushes to one
+  # branch; a newer run cancels the older one of its group. `github.ref` alone
+  # is not enough for that: for a pull request that is already merged it names
+  # the base branch, so a run GitHub started late for such a pull request was
+  # in the group of `main` and cancelled the run there.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
