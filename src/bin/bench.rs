@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use platzhirsch::model::{SortKey, Tree};
 use platzhirsch::scan::mft::scan_mft;
 use platzhirsch::scan::walk::scan_walk;
-use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget};
+use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget, io_error_text};
 use platzhirsch::win::{long_path_name, memory_mb, show_error, volume_info};
 
 const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]
@@ -56,6 +56,12 @@ fn parse_args(args: &[String]) -> Option<(Command, Option<String>)> {
     Some((command, out))
 }
 
+/// The line for an output file that could not be written. Like every error
+/// this tool prints it is English, whatever the system language.
+fn write_failure(path: &str, e: &std::io::Error) -> String {
+    format!("error: could not write {path}: {}", io_error_text(e))
+}
+
 /// Prints `lines` and, with `--out`, writes them to that file.
 fn emit(lines: &[String], out: Option<&str>) {
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
@@ -63,7 +69,7 @@ fn emit(lines: &[String], out: Option<&str>) {
     if let Some(path) = out
         && let Err(e) = std::fs::write(path, &text)
     {
-        eprintln!("error: could not write {path}: {e}");
+        eprintln!("{}", write_failure(path, &e));
         std::process::exit(1);
     }
 }
@@ -207,6 +213,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_write_is_reported_in_english() {
+        // What `std::fs::write` returns for a folder that does not exist.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("out.txt");
+        let e = std::fs::write(&path, "x").unwrap_err();
+        let path = path.to_string_lossy();
+        assert_eq!(write_failure(&path, &e), format!("error: could not write {path}: not found (OS error 3)"));
+    }
 
     #[test]
     fn drive_roots_in_every_form() {

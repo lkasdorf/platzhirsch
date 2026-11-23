@@ -91,6 +91,30 @@ pub enum ScanError {
     Ntfs(NtfsError),
 }
 
+/// What went wrong in `e`, in English: a message built by this program as it
+/// is, otherwise the kind of error with the Windows error code. Windows' own
+/// message text is in the system language, so it is never shown.
+pub fn io_error_text(e: &std::io::Error) -> String {
+    match (e.raw_os_error(), e.get_ref()) {
+        (None, Some(own)) => own.to_string(),
+        (code, _) => {
+            let description = match e.kind() {
+                std::io::ErrorKind::NotFound => "not found",
+                std::io::ErrorKind::PermissionDenied => "access denied",
+                std::io::ErrorKind::NotADirectory => "not a folder",
+                std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
+                std::io::ErrorKind::InvalidInput => "invalid input",
+                std::io::ErrorKind::InvalidData => "invalid data",
+                _ => "I/O error",
+            };
+            match code {
+                Some(code) => format!("{description} (OS error {code})"),
+                None => description.to_string(),
+            }
+        }
+    }
+}
+
 impl fmt::Display for ScanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -106,26 +130,7 @@ impl fmt::Display for ScanError {
                 f,
                 "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
             ),
-            ScanError::Io(e) => match (e.raw_os_error(), e.get_ref()) {
-                // Messages built by this program are English; show them as they are.
-                (None, Some(own)) => write!(f, "Read error: {own}"),
-                (code, _) => {
-                    // Windows' own message text is in the system language, so it is never shown.
-                    let description = match e.kind() {
-                        std::io::ErrorKind::NotFound => "not found",
-                        std::io::ErrorKind::PermissionDenied => "access denied",
-                        std::io::ErrorKind::NotADirectory => "not a folder",
-                        std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
-                        std::io::ErrorKind::InvalidInput => "invalid input",
-                        std::io::ErrorKind::InvalidData => "invalid data",
-                        _ => "I/O error",
-                    };
-                    match code {
-                        Some(code) => write!(f, "Read error: {description} (OS error {code})"),
-                        None => write!(f, "Read error: {description}"),
-                    }
-                }
-            },
+            ScanError::Io(e) => write!(f, "Read error: {}", io_error_text(e)),
             ScanError::Ntfs(e) => {
                 let detail = match e {
                     NtfsError::BadSignature => "invalid signature",
