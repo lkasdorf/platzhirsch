@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Name column of the folder table follows the window's width: it takes the space a
+  wider window adds and gives it back when the window gets narrower, down to its minimum
+  width. Until now it kept the width it had when the window opened, which left empty space
+  beside the columns after maximizing. A width set by hand follows the window in the same
+  way.
+
 ### Fixed
 
 - The folder table's columns on the right were cut off when the window was narrower than
