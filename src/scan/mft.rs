@@ -304,6 +304,12 @@ const KIND_EXT: u8 = 3;
 /// Internal flag bits next to `F_DIR` and `F_LINK`.
 const HAS_SIZE: u8 = 0x40;
 const HAS_NAME: u8 = 0x80;
+/// The two halves of a link whose `$REPARSE_POINT` is not resident: the
+/// attribute itself, and a `$FILE_NAME` whose tag copy names a link. Each
+/// may lie in another record of the file; together they make `F_LINK`.
+const REPARSE_UNREAD: u8 = 0x10;
+const NAME_SAYS_LINK: u8 = 0x20;
+const LINK_HALVES: u8 = REPARSE_UNREAD | NAME_SAYS_LINK;
 
 /// The compact per-record result (40 bytes); names live in one shared buffer.
 #[derive(Clone, Copy)]
@@ -367,6 +373,12 @@ fn parse_slot(rec: &mut [u8], record_no: u64) -> (Slot, Option<String>) {
     }
     if info.is_link {
         flags |= F_LINK;
+    }
+    if info.reparse_unread {
+        flags |= REPARSE_UNREAD;
+    }
+    if info.name_says_link {
+        flags |= NAME_SAYS_LINK;
     }
     if info.size.is_some() {
         flags |= HAS_SIZE;
@@ -510,7 +522,10 @@ pub fn scan_mft_from<R: VolumeReader>(r: &mut R, root_name: &str, progress: &Pro
             continue;
         };
         base.allocated = base.allocated.saturating_add(ext.allocated);
-        base.flags |= ext.flags & F_LINK;
+        base.flags |= ext.flags & (F_LINK | LINK_HALVES);
+        if base.flags & LINK_HALVES == LINK_HALVES {
+            base.flags |= F_LINK;
+        }
         if base.flags & HAS_SIZE == 0 && ext.flags & HAS_SIZE != 0 {
             base.size = ext.size;
             base.flags |= HAS_SIZE;
@@ -775,6 +790,37 @@ mod tests {
         ]);
         assert_eq!(r.skipped, 1);
         assert_eq!(r.tree.len(), 2);
+    }
+
+    #[test]
+    fn link_flag_when_reparse_point_and_name_lie_in_different_records() {
+        let surrogate = 0xA000_0003;
+        let r = scan_records(vec![
+            // The name with the tag copy in the base record, the non-resident $REPARSE_POINT in an extension.
+            (20, RecordBuilder::new(1024).dir().file_name_reparse(5, "junction", 1, surrogate).build(512)),
+            (21, RecordBuilder::new(1024).base(20).reparse_nonresident(RUNS, 5000).build(512)),
+            // The other way round.
+            (22, RecordBuilder::new(1024).dir().reparse_nonresident(RUNS, 5000).build(512)),
+            (23, RecordBuilder::new(1024).base(22).file_name_reparse(5, "named later", 1, surrogate).build(512)),
+            // Each half in an extension record of its own, the first before its base.
+            (24, RecordBuilder::new(1024).base(25).reparse_nonresident(RUNS, 5000).build(512)),
+            (25, RecordBuilder::new(1024).dir().build(512)),
+            (26, RecordBuilder::new(1024).base(25).file_name_reparse(5, "both elsewhere", 1, surrogate).build(512)),
+            // A cloud placeholder is a reparse point, but no link.
+            (27, RecordBuilder::new(1024).dir().file_name_reparse(5, "cloud", 1, 0x9000_001A).build(512)),
+            (28, RecordBuilder::new(1024).base(27).reparse_nonresident(RUNS, 5000).build(512)),
+            // A tag copy without any $REPARSE_POINT may be stale: no link.
+            (29, RecordBuilder::new(1024).dir().file_name_reparse(5, "stale", 1, surrogate).build(512)),
+            (30, RecordBuilder::new(1024).base(29).data_nonresident("", 0, RUNS, 8192, 5000, 0, 0).build(512)),
+        ]);
+        let t = &r.tree;
+        let is_link = |name: &str| t.flags(child(t, t.root(), name).unwrap_or_else(|| panic!("{name}"))) & F_LINK != 0;
+        assert!(is_link("junction"));
+        assert!(is_link("named later"));
+        assert!(is_link("both elsewhere"));
+        assert!(!is_link("cloud"));
+        assert!(!is_link("stale"));
+        assert_eq!(r.skipped, 0);
     }
 
     #[test]
