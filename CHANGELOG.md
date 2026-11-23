@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The program no longer ends with an access violation in the graphics driver when another
+  program makes its window wider or higher than the driver can draw to (16,384 pixels with
+  the Intel driver this was seen with). The window now stays within the size the driver
+  reports.
 - "Show in Explorer" selects the entry also when the scanned folder was given with the
   `\\?\` prefix (`platzhirsch --scan \\?\C:\Data`).
 - Fast scan: a junction or symbolic link is marked as a link also when its name and its

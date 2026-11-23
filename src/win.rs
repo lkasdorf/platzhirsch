@@ -5,7 +5,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
 use std::os::windows::process::CommandExt;
 
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, MAX_PATH, SYSTEMTIME};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, MAX_PATH, SYSTEMTIME, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
@@ -18,7 +18,10 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWNORMAL, SWP_NOSIZE, WINDOWPOS, WM_NCDESTROY, WM_WINDOWPOSCHANGING,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::scan::mft::VolumeReader;
@@ -240,6 +243,51 @@ pub fn show_error(title: &str, text: &str) {
     let (title, text) = (HSTRING::from(title), HSTRING::from(text));
     // SAFETY: both strings are NUL-terminated and outlive the call; no owner window is passed.
     let _ = unsafe { MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR) };
+}
+
+/// The width and height a window gets when neither may be more than `max`.
+fn limited_size(cx: i32, cy: i32, max: i32) -> (i32, i32) {
+    (cx.min(max), cy.min(max))
+}
+
+/// Keeps the window `hwnd` at most `max` pixels wide and high, whoever sets
+/// its size and however: the user, another program, a change of the display
+/// scale. Call it on the thread that owns the window. Returns whether the
+/// limit is in place.
+///
+/// The window library answers size changes itself without asking Windows to
+/// check them, so a size limit given to it holds for dragging only. A
+/// drawing surface larger than the graphics driver supports can end the
+/// program inside the driver.
+pub fn limit_window_size(hwnd: isize, max: i32) -> bool {
+    let Ok(limit) = usize::try_from(max) else { return false };
+    if limit == 0 {
+        return false;
+    }
+    // SAFETY: `size_limit_proc` matches the subclass signature and stays valid
+    // for the life of the program; an unknown window handle makes the call fail.
+    unsafe { SetWindowSubclass(HWND(hwnd as *mut _), Some(size_limit_proc), SIZE_LIMIT_ID, limit).as_bool() }
+}
+
+/// Identifies `size_limit_proc` among the subclasses of a window.
+const SIZE_LIMIT_ID: usize = 1;
+
+/// Runs before the window's own procedure: cuts every new size to the limit
+/// in `max`, then passes the message on.
+unsafe extern "system" fn size_limit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, max: usize) -> LRESULT {
+    if msg == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
+        // SAFETY: for this message Windows passes a pointer to a WINDOWPOS the
+        // receiver may change.
+        let pos = unsafe { &mut *(lparam.0 as *mut WINDOWPOS) };
+        if !pos.flags.contains(SWP_NOSIZE) {
+            (pos.cx, pos.cy) = limited_size(pos.cx, pos.cy, i32::try_from(max).unwrap_or(i32::MAX));
+        }
+    } else if msg == WM_NCDESTROY {
+        // SAFETY: the window is being destroyed; the subclass must go before it is.
+        let _ = unsafe { RemoveWindowSubclass(hwnd, Some(size_limit_proc), SIZE_LIMIT_ID) };
+    }
+    // SAFETY: passes the unchanged message on to the next procedure of this window.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 /// The argument that makes Explorer select `path`, or `None` if `path`
@@ -591,5 +639,81 @@ mod tests {
         let long = long_path_name(tmp.path()).unwrap();
         assert_eq!(long.file_name().unwrap(), name);
         assert!(long_path_name(&tmp.path().join("does not exist")).is_err());
+    }
+
+    #[test]
+    fn a_size_is_cut_to_the_limit_in_each_direction() {
+        assert_eq!(limited_size(900, 600, 16_384), (900, 600));
+        assert_eq!(limited_size(16_384, 16_384, 16_384), (16_384, 16_384));
+        assert_eq!(limited_size(900, 16_385, 16_384), (900, 16_384));
+        assert_eq!(limited_size(20_000, 600, 16_384), (16_384, 600));
+        assert_eq!(limited_size(10_686_500, i32::MAX, 16_384), (16_384, 16_384));
+        // Sizes Windows would not accept anyway pass unchanged.
+        assert_eq!(limited_size(0, -5, 16_384), (0, -5));
+    }
+
+    /// A window that is never shown, for the tests of the size limit. It has
+    /// no frame: for a framed window Windows itself cuts a new size to the
+    /// screen, which the window library of the real window switches off.
+    struct Hidden(windows::Win32::Foundation::HWND);
+
+    impl Hidden {
+        fn new() -> Self {
+            use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WINDOW_EX_STYLE, WS_POPUP};
+            // SAFETY: "STATIC" is a system window class; no parent, menu or creation data is passed.
+            let hwnd = unsafe {
+                CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), PCWSTR::null(), WS_POPUP, 0, 0, 300, 200, None, None, None, None)
+            };
+            Hidden(hwnd.expect("a hidden window"))
+        }
+
+        /// Asks for the outer size `cx` x `cy` the way another program would, and returns the size the window has then.
+        fn resize(&self, cx: i32, cy: i32) -> (i32, i32) {
+            use windows::Win32::Foundation::RECT;
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+            let mut rect = RECT::default();
+            // SAFETY: the window is alive and `rect` is valid for the call.
+            unsafe {
+                SetWindowPos(self.0, None, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).expect("SetWindowPos");
+                GetWindowRect(self.0, &mut rect).expect("GetWindowRect");
+            }
+            (rect.right - rect.left, rect.bottom - rect.top)
+        }
+    }
+
+    impl Drop for Hidden {
+        fn drop(&mut self) {
+            // SAFETY: the window was created by this thread and is destroyed once.
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn a_limited_window_cannot_be_made_larger_by_another_program() {
+        let window = Hidden::new();
+        // Without a limit Windows takes any size.
+        assert_eq!(window.resize(900, 20_000), (900, 20_000));
+        assert!(limit_window_size(window.0.0 as isize, 16_384));
+        assert_eq!(window.resize(900, 20_000), (900, 16_384));
+        assert_eq!(window.resize(20_000, 600), (16_384, 600));
+        assert_eq!(window.resize(10_686_500, 10_686_500), (16_384, 16_384));
+        // Sizes within the limit are untouched, the limit itself included.
+        assert_eq!(window.resize(16_384, 16_384), (16_384, 16_384));
+        assert_eq!(window.resize(900, 600), (900, 600));
+        // A move without a new size is not a resize.
+        use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
+        // SAFETY: the window is alive.
+        unsafe { SetWindowPos(window.0, None, 40, 50, 99_999, 99_999, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).expect("move") };
+        assert_eq!(window.resize(900, 600), (900, 600));
+    }
+
+    #[test]
+    fn a_limit_that_is_not_a_size_is_not_installed() {
+        let window = Hidden::new();
+        assert!(!limit_window_size(window.0.0 as isize, 0));
+        assert!(!limit_window_size(window.0.0 as isize, -1));
+        assert_eq!(window.resize(900, 20_000), (900, 20_000));
+        // No such window.
+        assert!(!limit_window_size(0, 16_384));
     }
 }

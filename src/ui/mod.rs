@@ -469,6 +469,35 @@ fn window_icon() -> egui::IconData {
     egui::IconData { rgba: icon_rgba(N), width: N, height: N }
 }
 
+/// The largest width and height in pixels a surface may have, from what the
+/// graphics driver reports as its largest viewport (width, height) and its
+/// largest texture. Values that are not a size are left out; `None` if none is.
+fn surface_limit(viewport: [i32; 2], texture: i32) -> Option<i32> {
+    [viewport[0], viewport[1], texture].into_iter().filter(|&v| v > 0).min()
+}
+
+/// The largest width and height in pixels the graphics driver can draw to.
+fn max_surface_size(gl: &eframe::glow::Context) -> Option<i32> {
+    use eframe::glow::{self, HasContext};
+    let mut viewport = [0i32; 2];
+    // SAFETY: the context is current on this thread while the app is being
+    // created; both calls only read limits of the driver.
+    let texture = unsafe {
+        gl.get_parameter_i32_slice(glow::MAX_VIEWPORT_DIMS, &mut viewport);
+        gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE)
+    };
+    surface_limit(viewport, texture)
+}
+
+/// The Win32 handle of the main window.
+fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
 /// Opens the main window. With `initial`, its scan starts right away.
 pub fn run(initial: Option<ScanTarget>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -483,6 +512,10 @@ pub fn run(initial: Option<ScanTarget>) -> eframe::Result<()> {
         "Platzhirsch",
         options,
         Box::new(move |cc| {
+            // A window larger than the driver can draw to ends the program in the driver.
+            if let (Some(max), Some(hwnd)) = (cc.gl.as_deref().and_then(max_surface_size), window_handle(cc)) {
+                win::limit_window_size(hwnd, max);
+            }
             let mut app = App::new();
             if let Some(target) = initial {
                 app.target = Some(target);
@@ -511,6 +544,18 @@ mod tests {
             unreadable: 0,
             online_only: 0,
         }
+    }
+
+    #[test]
+    fn surface_limit_is_the_smallest_size_the_driver_reports() {
+        assert_eq!(surface_limit([16_384, 16_384], 16_384), Some(16_384));
+        assert_eq!(surface_limit([32_768, 32_768], 16_384), Some(16_384));
+        assert_eq!(surface_limit([8_192, 16_384], 32_768), Some(8_192));
+        // A query that failed leaves 0 or an error value behind: it is not a size.
+        assert_eq!(surface_limit([0, 0], 16_384), Some(16_384));
+        assert_eq!(surface_limit([16_384, 16_384], -1), Some(16_384));
+        assert_eq!(surface_limit([0, 0], 0), None);
+        assert_eq!(surface_limit([-1, 0], -1), None);
     }
 
     fn done_phase() -> Phase {
