@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-23
+
 ### Changed
 
 - The source is formatted with rustfmt. `rustfmt.toml` holds the settings: lines of up to
@@ -216,7 +218,8 @@ First release.
 - Release workflow: pushing a tag `vX.Y.Z` builds on Windows and attaches
   `platzhirsch.exe` with its SHA-256 checksum to the GitHub release.
 
-[Unreleased]: https://github.com/lkasdorf/platzhirsch/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lkasdorf/platzhirsch/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/lkasdorf/platzhirsch/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lkasdorf/platzhirsch/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/lkasdorf/platzhirsch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/lkasdorf/platzhirsch/compare/v0.1.0...v0.2.0
