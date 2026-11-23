@@ -290,7 +290,8 @@ pub struct RawVolume {
 /// Where to continue after `done` bytes of a read were delivered: the last
 /// sector boundary that was reached completely.
 fn resume_point(done: usize, sector: usize) -> usize {
-    if sector == 0 { done } else { done / sector * sector }
+    // Without a sector size there is no boundary to go back to.
+    done.checked_div(sector).map_or(done, |sectors| sectors * sector)
 }
 
 impl RawVolume {
