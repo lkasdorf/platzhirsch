@@ -91,7 +91,7 @@ cargo test
 The tests run without administrator rights.
 
 The source is formatted with rustfmt; `rustfmt.toml` holds the settings. Run `cargo fmt`
-before a commit.
+before a commit: continuous integration fails if it would change a file.
 
 ## Use
 

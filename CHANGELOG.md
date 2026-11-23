@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The source is formatted with rustfmt. `rustfmt.toml` holds the settings: lines of up to
   120 columns, as the code was written before. The program itself is unchanged.
+  Continuous integration fails if `cargo fmt` would change a file.
 
 ### Fixed
 
