@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use platzhirsch::model::{SortKey, Tree};
 use platzhirsch::scan::mft::scan_mft;
 use platzhirsch::scan::walk::scan_walk;
-use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget};
+use platzhirsch::scan::{Progress, ScanError, ScanResult, ScanTarget, io_error_text};
 use platzhirsch::win::{long_path_name, memory_mb, show_error, volume_info};
 
 const USAGE: &str = "Usage: bench mft <X:> [--out <file>]\n       bench walk <path> [--out <file>]\n       bench compare <folder> [--out <file>]
@@ -56,6 +56,12 @@ fn parse_args(args: &[String]) -> Option<(Command, Option<String>)> {
     Some((command, out))
 }
 
+/// The line for an output file that could not be written. Like every error
+/// this tool prints it is English, whatever the system language.
+fn write_failure(path: &str, e: &std::io::Error) -> String {
+    format!("error: could not write {path}: {}", io_error_text(e))
+}
+
 /// Prints `lines` and, with `--out`, writes them to that file.
 fn emit(lines: &[String], out: Option<&str>) {
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
@@ -63,7 +69,7 @@ fn emit(lines: &[String], out: Option<&str>) {
     if let Some(path) = out
         && let Err(e) = std::fs::write(path, &text)
     {
-        eprintln!("error: could not write {path}: {e}");
+        eprintln!("{}", write_failure(path, &e));
         std::process::exit(1);
     }
 }
@@ -207,6 +213,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_write_is_reported_in_english() {
+        // What writing returns when the folder of the output file does not exist.
+        let e = std::io::Error::from_raw_os_error(3);
+        assert_eq!(write_failure(r"X:\missing\out.txt", &e), r"error: could not write X:\missing\out.txt: not found (OS error 3)");
+        let e = std::io::Error::from_raw_os_error(5);
+        assert_eq!(write_failure("out.txt", &e), "error: could not write out.txt: access denied (OS error 5)");
+    }
+
+    /// The 8.3 form of `path`, as Windows gives it; `path` itself where the
+    /// volume keeps no short names.
+    fn short_path(path: &Path) -> PathBuf {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        use windows::core::PCWSTR;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `buf` is writable and the binding passes its length.
+        let n = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        assert!(n > 0 && n < buf.len(), "no short path for {}", path.display());
+        std::ffi::OsString::from_wide(&buf[..n]).into()
+    }
+
+    #[test]
+    fn compare_expands_8_3_short_names() {
+        let dir = tempfile::Builder::new().prefix("Platzhirsch long folder name ").tempdir().unwrap();
+        let name = dir.path().file_name().unwrap().to_owned();
+        let short = short_path(dir.path());
+        let long = resolve_folder(&short).unwrap();
+        // The folder's own name comes back in full, and so does every name above it:
+        // resolving the result again changes nothing.
+        assert_eq!(long.file_name(), Some(name.as_os_str()));
+        assert_eq!(resolve_folder(&long).unwrap(), long);
+        // These are the names looked up in the MFT tree.
+        let (_, names) = split_drive_path(&long).expect("a local drive path");
+        assert_eq!(names.last().map(String::as_str), name.to_str());
+        if short.file_name() == Some(name.as_os_str()) {
+            // The volume keeps no 8.3 names, so there was nothing to expand here.
+            eprintln!("note: no 8.3 short name for {}", dir.path().display());
+        } else {
+            assert!(short.file_name().unwrap().len() <= 12, "{}", short.display());
+        }
+    }
 
     #[test]
     fn drive_roots_in_every_form() {

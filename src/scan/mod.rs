@@ -49,9 +49,12 @@ pub enum MethodChoice {
 }
 
 /// Picks the scan method: the MFT for whole NTFS volumes, the walk otherwise.
-pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str) -> MethodChoice {
+/// A `subst` drive (`substituted`) is a folder under a drive letter: it has no
+/// MFT of its own, whatever file system it reports.
+pub fn choose_method(target: &ScanTarget, elevated: bool, fs_name: &str, substituted: bool) -> MethodChoice {
     match target {
         ScanTarget::Folder(_) => MethodChoice::Walk,
+        ScanTarget::Volume(_) if substituted => MethodChoice::Walk,
         ScanTarget::Volume(_) if !fs_name.eq_ignore_ascii_case("NTFS") => MethodChoice::Walk,
         ScanTarget::Volume(_) if elevated => MethodChoice::Mft,
         ScanTarget::Volume(_) => MethodChoice::AskElevation,
@@ -91,6 +94,30 @@ pub enum ScanError {
     Ntfs(NtfsError),
 }
 
+/// What went wrong in `e`, in English: a message built by this program as it
+/// is, otherwise the kind of error with the Windows error code. Windows' own
+/// message text is in the system language, so it is never shown.
+pub fn io_error_text(e: &std::io::Error) -> String {
+    match (e.raw_os_error(), e.get_ref()) {
+        (None, Some(own)) => own.to_string(),
+        (code, _) => {
+            let description = match e.kind() {
+                std::io::ErrorKind::NotFound => "not found",
+                std::io::ErrorKind::PermissionDenied => "access denied",
+                std::io::ErrorKind::NotADirectory => "not a folder",
+                std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
+                std::io::ErrorKind::InvalidInput => "invalid input",
+                std::io::ErrorKind::InvalidData => "invalid data",
+                _ => "I/O error",
+            };
+            match code {
+                Some(code) => format!("{description} (OS error {code})"),
+                None => description.to_string(),
+            }
+        }
+    }
+}
+
 impl fmt::Display for ScanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -106,26 +133,7 @@ impl fmt::Display for ScanError {
                 f,
                 "MFT incomplete: found {found_bytes} of {expected_bytes} bytes"
             ),
-            ScanError::Io(e) => match (e.raw_os_error(), e.get_ref()) {
-                // Messages built by this program are English; show them as they are.
-                (None, Some(own)) => write!(f, "Read error: {own}"),
-                (code, _) => {
-                    // Windows' own message text is in the system language, so it is never shown.
-                    let description = match e.kind() {
-                        std::io::ErrorKind::NotFound => "not found",
-                        std::io::ErrorKind::PermissionDenied => "access denied",
-                        std::io::ErrorKind::NotADirectory => "not a folder",
-                        std::io::ErrorKind::UnexpectedEof => "unexpected end of data",
-                        std::io::ErrorKind::InvalidInput => "invalid input",
-                        std::io::ErrorKind::InvalidData => "invalid data",
-                        _ => "I/O error",
-                    };
-                    match code {
-                        Some(code) => write!(f, "Read error: {description} (OS error {code})"),
-                        None => write!(f, "Read error: {description}"),
-                    }
-                }
-            },
+            ScanError::Io(e) => write!(f, "Read error: {}", io_error_text(e)),
             ScanError::Ntfs(e) => {
                 let detail = match e {
                     NtfsError::BadSignature => "invalid signature",
@@ -147,13 +155,16 @@ mod tests {
     fn method_choice() {
         let vol = ScanTarget::Volume('C');
         let dir = ScanTarget::Folder("C:\\Data".into());
-        assert_eq!(choose_method(&vol, true, "NTFS"), MethodChoice::Mft);
-        assert_eq!(choose_method(&vol, false, "NTFS"), MethodChoice::AskElevation);
-        assert_eq!(choose_method(&vol, true, "exFAT"), MethodChoice::Walk);
-        assert_eq!(choose_method(&vol, false, "FAT32"), MethodChoice::Walk);
-        assert_eq!(choose_method(&dir, true, "NTFS"), MethodChoice::Walk);
-        assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, ""), MethodChoice::Walk);
-        assert_eq!(choose_method(&vol, true, "ntfs"), MethodChoice::Mft);
+        assert_eq!(choose_method(&vol, true, "NTFS", false), MethodChoice::Mft);
+        assert_eq!(choose_method(&vol, false, "NTFS", false), MethodChoice::AskElevation);
+        assert_eq!(choose_method(&vol, true, "exFAT", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, false, "FAT32", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&dir, true, "NTFS", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&ScanTarget::Folder("\\\\nas\\share".into()), true, "", false), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, true, "ntfs", false), MethodChoice::Mft);
+        // A `subst` drive reports the file system of its folder, but has no MFT.
+        assert_eq!(choose_method(&vol, true, "NTFS", true), MethodChoice::Walk);
+        assert_eq!(choose_method(&vol, false, "NTFS", true), MethodChoice::Walk);
     }
 
     #[test]

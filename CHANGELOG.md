@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A drive made with `subst` is scanned with the folder scan right away. It was offered the
+  fast scan, which it cannot have: the restart with administrator rights ended in an error.
+- Continuous integration also compiles the project with Rust 1.95, the minimum version it
+  declares.
+
+### Fixed
+
+- "Show in Explorer" selects the entry also when the scanned folder was given with the
+  `\\?\` prefix (`platzhirsch --scan \\?\C:\Data`).
+- Fast scan: a junction or symbolic link is marked as a link also when its name and its
+  reparse data lie in different file records (tested on synthetic images).
+- The diagnostic program `bench` reports an output file it cannot write in English, like
+  its other errors, instead of in the language of the system.
+
 ## [0.2.1] - 2026-11-23
 
 ### Changed

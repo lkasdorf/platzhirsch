@@ -33,6 +33,14 @@ pub struct RecordInfo {
     /// non-resident `$DATA`; `None` if this record holds no such extent.
     pub initialized: Option<u64>,
     pub is_link: bool,
+    /// This record holds a non-resident `$REPARSE_POINT`, which is not read.
+    /// Whether the entry is a link then depends on the tag copy in a
+    /// `$FILE_NAME`, which may lie in another record of the same file.
+    pub reparse_unread: bool,
+    /// The first `$FILE_NAME` of this record that is marked as a reparse
+    /// point carries the tag of a link. Only a copy, and possibly stale: it
+    /// counts only together with a `$REPARSE_POINT`.
+    pub name_says_link: bool,
     pub data_runs: Vec<(u64, Vec<Run>)>,
     pub attr_list: Option<AttrListLoc>,
 }
@@ -220,6 +228,8 @@ pub fn parse_record(record: &[u8], record_no: u64, want_runs: bool) -> Result<Re
         allocated: 0,
         initialized: None,
         is_link: false,
+        reparse_unread: false,
+        name_says_link: false,
         data_runs: Vec::new(),
         attr_list: None,
     };
@@ -252,11 +262,12 @@ pub fn parse_record(record: &[u8], record_no: u64, want_runs: bool) -> Result<Re
         pos += len; // len >= 16, so the loop always advances
     }
     // A non-resident $REPARSE_POINT is not read; the tag is taken from the
-    // copy in $FILE_NAME instead.
-    if attrs.nonresident_reparse
-        && let Some(tag) = attrs.file_name_reparse_tag
-    {
-        info.is_link = tag & REPARSE_NAME_SURROGATE != 0;
+    // copy in $FILE_NAME instead. The two may lie in different records of
+    // one file, so both halves are reported for the caller to join.
+    info.reparse_unread = attrs.nonresident_reparse;
+    info.name_says_link = attrs.file_name_reparse_tag.is_some_and(|tag| tag & REPARSE_NAME_SURROGATE != 0);
+    if info.reparse_unread && attrs.file_name_reparse_tag.is_some() {
+        info.is_link = info.name_says_link;
     }
     Ok(info)
 }
@@ -626,6 +637,13 @@ mod tests {
 
     #[test]
     fn nonresident_reparse_uses_file_name_tag() {
+        let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000));
+        assert!(info.reparse_unread && info.name_says_link);
+        // The two halves alone, as they lie in a base and an extension record.
+        let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003));
+        assert!(!info.is_link && !info.reparse_unread && info.name_says_link);
+        let info = parse(RecordBuilder::new(1024).reparse_nonresident(RUNS, 5000));
+        assert!(!info.is_link && info.reparse_unread && !info.name_says_link);
         let info = parse(RecordBuilder::new(1024).dir().file_name_reparse(5, "j", 1, 0xA000_0003).reparse_nonresident(RUNS, 5000));
         assert!(info.is_link);
         // not a name surrogate

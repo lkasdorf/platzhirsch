@@ -58,3 +58,41 @@ jobs:
           path: target/release/platzhirsch.exe
           if-no-files-found: error
           retention-days: 30
+
+  minimum-rust:
+    name: Check with the minimum Rust version (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust version Cargo.toml declares
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          # `rust-version` in Cargo.toml is the one place that names it.
+          $line = Select-String -Path Cargo.toml -Pattern '^rust-version\s*=\s*"([0-9.]+)"' | Select-Object -First 1
+          if (-not $line) { Write-Error "Cargo.toml declares no rust-version"; exit 1 }
+          $version = $line.Matches[0].Groups[1].Value
+          rustup toolchain install $version --profile minimal --no-self-update
+          rustup default $version
+          rustc --version
+          cargo --version
+          "MSRV=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-msrv-${{ runner.os }}-${{ env.MSRV }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-msrv-${{ runner.os }}-${{ env.MSRV }}-
+
+      # Everything is compiled, tests and the diagnostic program included; the
+      # tests themselves run in the job above.
+      - name: Check
+        run: cargo check --locked --all-targets
