@@ -9,10 +9,11 @@
 //! keyboard focus is on. The cells' own texts are hidden from them.
 use eframe::egui::{
     self, Align, Color32, Context, Event, FocusDirection, Id, IdSalt, Key, Layout, Popup, Rangef, Rect, Response, Role,
-    ScrollArea, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
+    ScrollArea, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, scroll_area, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
+use super::far_scroll::{self, FarScroll, Geometry};
 use super::rows::{NavKey, TreeView, metric_key};
 use crate::format::{format_bytes, format_count, format_date, format_percent};
 use crate::model::{F_LINK, F_ONLINE_ONLY, F_UNREADABLE, Metric, NodeId, SortKey, Tree};
@@ -512,6 +513,40 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
     let anew = kept.and_then(|w| w.for_window(available));
     let mut seen = [0.0; COLUMNS.len()];
 
+    // A list too long for egui to place exactly is scrolled by the table
+    // itself (see `far_scroll`); egui then gets the offset to show.
+    let state_id = ui.scope_id().with(IdSalt::new(TABLE_SALT));
+    let scroll_id = ui.scope_id().with(IdSalt::new(state_id.with("__scroll_area")));
+    let far_id = table.with("far_scroll");
+    let kept_far = ctx.data(|d| d.get_temp::<(FarScroll, f32)>(far_id));
+    let total_rows = view.rows().len();
+    let row_gap = ui.spacing().item_spacing.y;
+    let mut view_height = kept_far.map_or_else(|| ui.available_height() - row_height - row_gap, |(_, height)| height);
+    let mut offset = None;
+    let far = (far_scroll::virtual_rows(total_rows) != total_rows).then(|| {
+        let offset_now = scroll_area::State::load(&ctx, scroll_id).map_or(0.0, |s| s.clamped_offset().y);
+        // The scroll bar's own widget, as egui names it.
+        let bar_held = ctx.read_response(scroll_id.with(1usize)).is_some_and(|bar| bar.is_pointer_button_down_on());
+        let geometry = Geometry {
+            total: total_rows,
+            step: f64::from(row_height + row_gap),
+            spacing: f64::from(row_gap),
+            view: f64::from(view_height.max(0.0)),
+        };
+        let placement =
+            far_scroll::place(kept_far.map(|(far, _)| far), offset_now, bar_held, scroll_to.take(), &geometry);
+        if placement.scroll.offset != offset_now {
+            offset = Some(placement.scroll.offset);
+        }
+        placement
+    });
+    if far.is_none()
+        && let Some((left, _)) = kept_far
+    {
+        // Short enough for egui again: it goes on where the view was.
+        offset = Some(left.top as f32);
+    }
+
     {
         // Labels must not swallow the clicks that select rows.
         ui.style_mut().interaction.selectable_labels = false;
@@ -535,6 +570,9 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
         if let Some(row) = scroll_to {
             builder = builder.scroll_to_row(row, None);
         }
+        if let Some(offset) = offset {
+            builder = builder.vertical_scroll_offset(offset);
+        }
         if keys.menu {
             // Jump to the row, so it is drawn by the next frame and its menu can open.
             builder = builder.animate_scrolling(false);
@@ -555,8 +593,15 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                 let focus_stroke = body.ui_mut().visuals().selection.stroke;
                 let row_x = body.max_rect().x_range();
                 let rows = view.rows();
-                body.rows(row_height, rows.len(), |mut row| {
-                    let r = rows[row.index()];
+                view_height = body.ui_mut().clip_rect().height();
+                body.rows(row_height, far_scroll::virtual_rows(rows.len()), |mut row| {
+                    // In a long list egui's rows stand for the rows at the scroll position.
+                    let index = match &far {
+                        Some(placement) => placement.real_row(row.index(), rows.len()),
+                        None => Some(row.index()),
+                    };
+                    let Some(&r) = index.and_then(|index| rows.get(index)) else { return };
+                    let index = index.unwrap_or_default();
                     let node = r.node;
                     let is_dir = tree.is_dir(node);
                     let selected = node == view.selected;
@@ -606,7 +651,7 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                         }
                     }
                     if response.clicked() || response.secondary_clicked() {
-                        input.select = Some(row.index());
+                        input.select = Some(index);
                     }
                     if response.double_clicked() && is_dir {
                         input.toggle = Some(node);
@@ -657,7 +702,6 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
             });
         // The column resize handles would be Tab stops and screen reader
         // regions without a name or a visible focus; the mouse keeps them.
-        let state_id = ui.scope_id().with(IdSalt::new(TABLE_SALT));
         for i in 0..COLUMNS.len() {
             let handle = state_id.with("resize_column").with(i);
             ctx.memory_mut(|m| m.ignore_focus(handle));
@@ -666,6 +710,13 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
     }
     let name = anew.or(kept).map_or(seen[0], |w| w.name);
     ctx.data_mut(|d| d.insert_temp(widths_id, Widths { columns: seen, name, available }));
+    ctx.data_mut(|d| {
+        if let Some(placement) = far {
+            d.insert_temp(far_id, (placement.scroll, view_height));
+        } else {
+            d.remove::<(FarScroll, f32)>(far_id);
+        }
+    });
 
     // While the table has the focus, screen readers are on the selected row.
     if let Some((item, _)) = input.selected_item {
@@ -1453,5 +1504,270 @@ mod tests {
             press(&mut h, Key::ArrowDown);
             assert_eq!(h.state().view.selected, 1);
         }
+    }
+}
+
+/// Headless tests of a list longer than egui scrolls by itself.
+#[cfg(test)]
+mod long_list {
+    use super::*;
+    use crate::model::{F_DIR, NO_PARENT, TreeBuilder};
+    use eframe::egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton, Pos2, TouchPhase};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    struct State {
+        tree: Tree,
+        view: TreeView,
+        scroll_to: Option<usize>,
+    }
+
+    /// The root `C:` with `files` files `f0`, `f1`, ... in this order: row `i + 1` is `f{i}`.
+    fn harness(files: u32) -> Harness<'static, State> {
+        let mut b = TreeBuilder::with_capacity(files as usize + 1, 16);
+        let root = b.push("C:", NO_PARENT, 0, 0, 0, F_DIR);
+        for i in 0..files {
+            let size = u64::from(files - i) * 4096;
+            b.push(&format!("f{i}"), root, size, size, 0, 0);
+        }
+        let tree = b.finish(root).0;
+        let view = TreeView::new(&tree, Metric::Allocated);
+        let mut h = Harness::builder().with_size(vec2(900.0, 400.0)).with_step_dt(0.05).build_ui_state(
+            |ui, s: &mut State| show(ui, &s.tree, &mut s.view, s.scroll_to.take()),
+            State { tree, view, scroll_to: None },
+        );
+        h.run_steps(3);
+        h
+    }
+
+    /// The rows on screen from top to bottom: name, top and bottom edge.
+    fn drawn(h: &Harness<'_, State>) -> Vec<(String, f32, f32)> {
+        let mut rows: Vec<(String, f32, f32)> = h
+            .query_all_by_role(Role::TreeItem)
+            .map(|node| {
+                let name = node.accesskit_node().label().unwrap_or_default();
+                (name.split(',').next().unwrap_or_default().to_string(), node.rect().min.y, node.rect().max.y)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.total_cmp(&b.1));
+        rows
+    }
+
+    fn names(rows: &[(String, f32, f32)]) -> Vec<&str> {
+        rows.iter().map(|r| r.0.as_str()).collect()
+    }
+
+    /// The edges of the rows without their names.
+    fn edges(rows: &[(String, f32, f32)]) -> Vec<(f32, f32)> {
+        rows.iter().map(|r| (r.1, r.2)).collect()
+    }
+
+    fn scroll_to(h: &mut Harness<'_, State>, row: usize) {
+        h.state_mut().view.select_row(row);
+        h.state_mut().scroll_to = Some(row);
+        h.run_steps(40);
+    }
+
+    fn wheel(h: &mut Harness<'_, State>, at: Pos2, points: f32) {
+        h.hover_at(at);
+        h.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, points),
+            phase: TouchPhase::Move,
+            source: MouseWheelSource::Unknown,
+            modifiers: Modifiers::NONE,
+        });
+        // egui spreads a wheel step over some frames.
+        h.run_steps(60);
+    }
+
+    /// The number in a file's name: `f123` is 123.
+    fn file_number(name: &str) -> usize {
+        name.trim_start_matches('f').parse().unwrap_or_else(|_| panic!("not a file row: {name}"))
+    }
+
+    #[test]
+    fn the_end_of_two_million_rows_is_placed_like_the_end_of_a_thousand() {
+        let mut short = harness(1_000);
+        scroll_to(&mut short, 1_000);
+        let want = drawn(&short);
+        assert_eq!(names(&want).last(), Some(&"f999"));
+
+        // 46 million points high: there egui's positions are 4 points apart.
+        let mut long = harness(2_000_000);
+        scroll_to(&mut long, 2_000_000);
+        let got = drawn(&long);
+        assert_eq!(edges(&got), edges(&want), "{got:?}");
+        let last: Vec<String> = (2_000_000 - got.len()..2_000_000).map(|i| format!("f{i}")).collect();
+        assert_eq!(names(&got), last);
+        // The start is where a short list starts, too.
+        scroll_to(&mut short, 0);
+        scroll_to(&mut long, 0);
+        assert_eq!(drawn(&long), drawn(&short));
+    }
+
+    #[test]
+    fn the_wheel_moves_a_long_list_row_by_row() {
+        let mut h = harness(300_000);
+        let start = drawn(&h);
+        assert_eq!(names(&start)[..3], ["C:", "f0", "f1"]);
+        let at = Pos2::new(300.0, (start[5].1 + start[5].2) / 2.0);
+        // Ten rows of 23 points down.
+        wheel(&mut h, at, -230.0);
+        let moved = drawn(&h);
+        assert_eq!(names(&moved)[..3], ["f9", "f10", "f11"]);
+        assert_eq!(edges(&moved), edges(&start));
+        // Part of a row more: the same rows, that much higher.
+        wheel(&mut h, at, -12.0);
+        let part = drawn(&h);
+        assert_eq!(part[1].0, "f10");
+        assert_eq!(part[1].1, start[1].1 - 12.0);
+        wheel(&mut h, at, 12.0);
+        assert_eq!(drawn(&h), moved);
+
+        // The same far down the list, where egui's row is not the real one.
+        scroll_to(&mut h, 200_000);
+        let before = drawn(&h);
+        let first = file_number(&before[0].0);
+        wheel(&mut h, at, -230.0);
+        let after = drawn(&h);
+        assert_eq!(file_number(&after[0].0), first + 10);
+        assert_eq!(edges(&after), edges(&before));
+        wheel(&mut h, at, 460.0);
+        assert_eq!(file_number(&drawn(&h)[0].0), first - 10);
+        // Up from the top and down from the end it stops.
+        scroll_to(&mut h, 0);
+        wheel(&mut h, at, 500.0);
+        assert_eq!(drawn(&h), start);
+        scroll_to(&mut h, 300_000);
+        let end = drawn(&h);
+        wheel(&mut h, at, -500.0);
+        assert_eq!(drawn(&h), end);
+        assert_eq!(names(&end).last(), Some(&"f299999"));
+    }
+
+    /// Top and bottom edge of the part of the table that shows rows; leaves the list at its start.
+    fn view_edges(h: &mut Harness<'_, State>) -> (f32, f32) {
+        let last = h.state().view.rows().len() - 1;
+        scroll_to(h, last);
+        let bottom = drawn(h).last().unwrap().2;
+        scroll_to(h, 0);
+        (drawn(h)[0].1, bottom)
+    }
+
+    #[test]
+    fn the_scroll_bar_of_a_long_list_spans_the_whole_list() {
+        let mut h = harness(300_000);
+        let (top, bottom) = view_edges(&mut h);
+        // The bar is at the right edge of the rows; a press on its track puts the handle there.
+        let bar = |y: f32| Pos2::new(888.0, y);
+        let middle = bar((top + bottom) / 2.0);
+        h.hover_at(middle);
+        h.run_steps(5);
+        h.event(Event::PointerButton {
+            pos: middle,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(5);
+        let at_middle = file_number(&drawn(&h)[0].0);
+        assert!((147_000..153_000).contains(&at_middle), "row {at_middle} at the middle of the bar");
+        // Held still, the list stays where it is.
+        h.run_steps(5);
+        assert_eq!(file_number(&drawn(&h)[0].0), at_middle);
+        // Dragged to the bottom: the last row, where the end of a list is.
+        for y in [bottom - 40.0, bottom, bottom + 60.0] {
+            h.event(Event::PointerMoved(bar(y)));
+            h.run_steps(3);
+        }
+        h.event(Event::PointerButton {
+            pos: bar(bottom + 60.0),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(5);
+        let end = drawn(&h);
+        assert_eq!(names(&end).last(), Some(&"f299999"));
+        assert_eq!(end.last().unwrap().2, bottom);
+    }
+
+    /// Clicks the fourth row on screen, goes 40 rows down and 60 up with the
+    /// arrow keys, and returns the edges of the selected row after either.
+    fn walk(h: &mut Harness<'_, State>) -> [(f32, f32); 2] {
+        let rows = drawn(h);
+        let click = Pos2::new(300.0, (rows[3].1 + rows[3].2) / 2.0);
+        h.hover_at(click);
+        for pressed in [true, false] {
+            h.event(Event::PointerButton {
+                pos: click,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        h.run();
+        let clicked = h.state().view.selected_row();
+        assert_eq!(format!("f{}", clicked - 1), rows[3].0);
+        let mut edges = [(0.0, 0.0); 2];
+        for (i, (key, times, row)) in
+            [(Key::ArrowDown, 40, clicked + 40), (Key::ArrowUp, 60, clicked - 20)].into_iter().enumerate()
+        {
+            for _ in 0..times {
+                h.key_press(key);
+                h.run();
+            }
+            h.run_steps(40);
+            assert_eq!(h.state().view.selected_row(), row);
+            let name = format!("f{}", row - 1);
+            let rows = drawn(h);
+            let selected =
+                rows.iter().find(|r| r.0 == name).unwrap_or_else(|| panic!("{name} not on screen: {rows:?}"));
+            edges[i] = (selected.1, selected.2);
+        }
+        edges
+    }
+
+    #[test]
+    fn the_arrow_keys_keep_the_selected_row_of_a_long_list_in_view() {
+        // What a list does that egui scrolls by itself.
+        let mut short = harness(5_000);
+        let (top, bottom) = view_edges(&mut short);
+        scroll_to(&mut short, 2_000);
+        let want = walk(&mut short);
+        // Down: the row, the gap below it and one more gap end at the lower edge.
+        // Up: the row is the first one, a gap below the upper edge.
+        assert_eq!(want, [(bottom - 26.0, bottom - 6.0), (top + 3.0, top + 23.0)]);
+
+        let mut long = harness(300_000);
+        assert_eq!(view_edges(&mut long), (top, bottom));
+        scroll_to(&mut long, 200_000);
+        assert_eq!(walk(&mut long), want);
+    }
+
+    #[test]
+    fn a_list_that_gets_short_again_goes_on_where_it_was() {
+        // Just past what egui scrolls by itself.
+        let files = far_scroll::NATIVE_ROWS as u32 + 10;
+        let mut h = harness(files);
+        scroll_to(&mut h, 1_000);
+        let at = Pos2::new(300.0, 200.0);
+        wheel(&mut h, at, -230.0);
+        let long = drawn(&h);
+        // Sorted the other way round the list is as long; collapsed it is one row.
+        let root = h.state().tree.root();
+        let s = h.state_mut();
+        s.view.toggle(&s.tree, root);
+        h.run_steps(5);
+        assert_eq!(names(&drawn(&h)), ["C:"]);
+        let s = h.state_mut();
+        s.view.toggle(&s.tree, root);
+        h.run_steps(5);
+        // Open again it starts at the top, as a short list does after it was one row.
+        assert_eq!(names(&drawn(&h))[..2], ["C:", "f0"]);
+        scroll_to(&mut h, 1_000);
+        wheel(&mut h, at, -230.0);
+        assert_eq!(drawn(&h), long);
     }
 }

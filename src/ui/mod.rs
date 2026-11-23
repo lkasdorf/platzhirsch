@@ -1,5 +1,6 @@
 //! The main window: top bar, central area, status bar and the scan lifecycle.
 pub mod bars;
+mod far_scroll;
 pub mod rows;
 pub mod table;
 pub mod treemap_view;
