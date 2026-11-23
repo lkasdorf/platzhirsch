@@ -9,7 +9,7 @@
 //! keyboard focus is on. The cells' own texts are hidden from them.
 use eframe::egui::{
     self, Align, Color32, Context, Event, FocusDirection, Id, IdSalt, Key, Layout, Popup, Rangef, Rect, Response,
-    Role, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
+    Role, ScrollArea, Sense, StrokeKind, Ui, UiBuilder, WidgetInfo, accesskit, vec2,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
@@ -49,6 +49,8 @@ const ARROW_WIDTH: f32 = 14.0;
 const BAR_COLOR: Color32 = Color32::from_rgba_unmultiplied_const(240, 170, 50, 110);
 /// Id salt of the `TableBuilder`; the column resize handles derive their ids from it.
 const TABLE_SALT: &str = "tree_table";
+/// Id salt of the scroll area that moves the table sideways.
+const SIDEWAYS_SALT: &str = "tree_table_sideways";
 /// The accessible name of the table.
 const TABLE_NAME: &str = "Folders";
 /// A menu asked for with the keyboard waits this many frames for its row to be on screen:
@@ -187,13 +189,17 @@ pub(super) fn full_path(tree: &Tree, node: NodeId) -> String {
 
 /// A cell with `text` right-aligned (or nothing). The row's name already
 /// says what the cell shows, so the cell is hidden from screen readers.
-fn text_cell(row: &mut TableRow<'_, '_>, ctx: &Context, text: Option<&str>) {
+/// Returns the cell's rectangle.
+fn text_cell(row: &mut TableRow<'_, '_>, ctx: &Context, text: Option<&str>) -> Rect {
+    let mut rect = Rect::NOTHING;
     let (_, cell) = row.col(|ui| {
+        rect = ui.max_rect();
         if let Some(text) = text {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text));
         }
     });
     hide_from_screen_readers(ctx, cell.id);
+    rect
 }
 
 /// A small triangle showing the sort direction.
@@ -366,7 +372,9 @@ fn name_cell(
 /// column headers are Tab stops of their own and sort with Space or Enter.
 pub fn show(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>) {
     let builder = UiBuilder::new().scope_id(table_id()).sense(Sense::FOCUSABLE).accessibility_role(Role::Tree);
-    let shown = ui.scope_builder(builder, |ui| table(ui, tree, view, scroll_to));
+    // Sideways when the columns are wider than the window; the table scrolls its rows itself.
+    let sideways = ScrollArea::horizontal().id_salt(SIDEWAYS_SALT).auto_shrink(false);
+    let shown = sideways.show(ui, |ui| ui.scope_builder(builder, |ui| table(ui, tree, view, scroll_to))).inner;
     let response = shown.response;
     response.widget_info(|| WidgetInfo::labeled(Role::Tree, true, TABLE_NAME));
     // After the table's `Ui` has ended: it gives up the focus when the click
@@ -498,7 +506,12 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                     row.set_selected(selected);
                     let texts = RowTexts::new(tree, node, metric);
                     let mut item = None;
+                    // From the first cell's left edge to the last cell's right edge, where the
+                    // highlight ends. The row's response is no measure: a cell that fills its
+                    // width reports a rectangle reaching past its column.
+                    let mut cells = Rect::NOTHING;
                     row.col(|ui| {
+                        cells = ui.max_rect();
                         let (arrow_clicked, response) = name_cell(ui, tree, view, node, r.depth, row_height, row_x);
                         if arrow_clicked {
                             input.toggle = Some(node);
@@ -512,7 +525,7 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                     text_cell(&mut row, &ctx, files.as_deref());
                     text_cell(&mut row, &ctx, folders.as_deref());
                     text_cell(&mut row, &ctx, Some(&texts.percent));
-                    text_cell(&mut row, &ctx, Some(&format_date(tree.mtime(node))));
+                    cells |= text_cell(&mut row, &ctx, Some(&format_date(tree.mtime(node))));
 
                     let response = row.response();
                     if let Some(item) = item {
@@ -532,7 +545,7 @@ fn table(ui: &mut Ui, tree: &Tree, view: &mut TreeView, scroll_to: Option<usize>
                             }
                         });
                         if selected {
-                            input.selected_item = Some((item.id, response.rect));
+                            input.selected_item = Some((item.id, cells));
                         }
                     }
                     if response.clicked() || response.secondary_clicked() {
@@ -1172,6 +1185,102 @@ mod tests {
             h.run();
             assert!(h.query_by_label("f199").is_some(), "scrolled to the row");
             assert!(h.query_by_label("Copy path").is_none(), "but the late menu stays closed");
+        }
+
+        /// Every rectangle painted in the last frame.
+        fn painted_rects(h: &Harness<'_, State>) -> Vec<egui::epaint::RectShape> {
+            fn collect(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+                match shape {
+                    egui::Shape::Rect(rect) => out.push(rect.clone()),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            h.output().shapes.iter().for_each(|s| collect(&s.shape, &mut out));
+            out
+        }
+
+        /// The horizontal extent of the selected row's highlight and of its focus outline.
+        fn highlight_and_outline(h: &Harness<'_, State>) -> (Rangef, Rangef) {
+            let selection = h.ctx.global_style().visuals.selection;
+            let rects = painted_rects(h);
+            let span = |what: &str, matches: &dyn Fn(&egui::epaint::RectShape) -> bool| {
+                let found: Vec<_> = rects.iter().filter(|r| matches(r)).collect();
+                assert!(!found.is_empty(), "no {what} painted");
+                let left = found.iter().map(|r| r.rect.left()).fold(f32::INFINITY, f32::min);
+                let right = found.iter().map(|r| r.rect.right()).fold(f32::NEG_INFINITY, f32::max);
+                Rangef::new(left, right)
+            };
+            let highlight = span("highlight", &|r| r.fill == selection.bg_fill);
+            let outline = span("outline", &|r| r.fill == Color32::TRANSPARENT && r.stroke == selection.stroke);
+            (highlight, outline)
+        }
+
+        /// Drags the right edge of the Name column by `dx`.
+        fn drag_name_column(h: &mut Harness<'_, State>, dx: f32) {
+            let header = h.get_by_label("Sort by Name").rect();
+            let gap = h.ctx.global_style().spacing.item_spacing.x;
+            let from = egui::pos2(header.right() + gap * 0.5, header.center().y);
+            let to = from + vec2(dx, 0.0);
+            h.hover_at(from);
+            h.run();
+            h.drag_at(from);
+            h.run();
+            h.hover_at(to);
+            h.run();
+            h.drop_at(to);
+            h.run();
+        }
+
+        /// The horizontal extent of the header of the last column.
+        fn last_header(h: &Harness<'_, State>) -> Rangef {
+            h.get_by_label("Sort by Modified").rect().x_range()
+        }
+
+        #[test]
+        fn focus_outline_ends_with_the_last_column() {
+            let mut h = harness();
+            press(&mut h, Key::Tab);
+            assert_eq!(focused(&h), Some(table_id()));
+            for narrowed in [false, true] {
+                if narrowed {
+                    // Now the columns end well before the window does.
+                    drag_name_column(&mut h, -200.0);
+                    assert!(last_header(&h).max < 800.0);
+                }
+                let (highlight, outline) = highlight_and_outline(&h);
+                assert_eq!(outline.max, last_header(&h).max, "narrowed: {narrowed}");
+                assert!(highlight.min <= outline.min && outline.max <= highlight.max, "narrowed: {narrowed}");
+            }
+        }
+
+        #[test]
+        fn window_narrower_than_the_columns_scrolls_sideways() {
+            let mut h = harness();
+            h.set_size(vec2(500.0, 400.0));
+            h.run();
+            assert!(last_header(&h).max > 500.0, "the last column does not fit");
+            // Over a row, but not over a name: that would show its tooltip.
+            let over_row = egui::pos2(h.get_by_label("Sort by Allocated").rect().center().x, label_center(&h, "a").y);
+            h.hover_at(over_row);
+            h.event(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(-2000.0, 0.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: Modifiers::NONE,
+            });
+            // The wheel is smoothed over several frames.
+            h.run_steps(20);
+            let last = last_header(&h);
+            assert!(last.max <= 500.0 && last.min >= 0.0, "the last column is on screen: {last:?}");
+            // The rows moved with the headers, and the keys still work on them.
+            assert!(label_center(&h, "a").x < 0.0);
+            press(&mut h, Key::Tab);
+            press(&mut h, Key::ArrowDown);
+            assert_eq!(h.state().view.selected, 1);
+            assert!(last_header(&h).max <= 500.0, "moving the selection does not scroll back");
         }
 
         #[test]
