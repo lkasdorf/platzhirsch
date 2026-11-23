@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The folder table's columns on the right were cut off when the window was narrower than
+  the columns. The table now scrolls sideways, with a horizontal scroll bar at its lower
+  edge.
+- The focus outline of the selected table row reached beyond the last column; it now ends
+  where the row's highlight ends.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
