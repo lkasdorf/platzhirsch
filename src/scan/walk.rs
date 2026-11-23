@@ -557,6 +557,56 @@ fn plan_root(given: Vec<u16>, first: LevelCheck, resolved: Option<Vec<u16>>) -> 
     (resolved.unwrap_or(given), check_fully)
 }
 
+/// What finding the root to list asks of the file system.
+trait RootFs {
+    /// See [`check_levels`].
+    fn check_levels(&self, path: &[u16], stop_at_link: bool) -> LevelCheck;
+    /// See [`ensure_directory`].
+    fn ensure_directory(&self, path: &[u16], allow_link: bool) -> io::Result<()>;
+    /// See [`final_path`].
+    fn final_path(&self, path: &[u16]) -> Option<Vec<u16>>;
+}
+
+/// The real file system.
+struct Disk;
+
+impl RootFs for Disk {
+    fn check_levels(&self, path: &[u16], stop_at_link: bool) -> LevelCheck {
+        check_levels(path, stop_at_link)
+    }
+
+    fn ensure_directory(&self, path: &[u16], allow_link: bool) -> io::Result<()> {
+        ensure_directory(path, allow_link)
+    }
+
+    fn final_path(&self, path: &[u16]) -> Option<Vec<u16>> {
+        final_path(path)
+    }
+}
+
+/// The path to list for the root `given` (verbatim, no NUL), or the reason
+/// the walk must not start.
+///
+/// The path as given is checked before anything on it is opened: opening an
+/// online-only item can already make the provider fetch it. Links on the way
+/// are checked themselves; what lies behind them is checked once they are
+/// resolved, and so is a path that resolves elsewhere without a link on the
+/// way.
+fn listed_root(given: Vec<u16>, fs: &impl RootFs) -> Result<Vec<u16>, ScanError> {
+    let first = fs.check_levels(&given, true);
+    if first == LevelCheck::Refuse {
+        return Err(ScanError::OnlineOnly);
+    }
+    fs.ensure_directory(&given, true).map_err(scan_error)?;
+    let resolved = fs.final_path(&given);
+    let (root_path, check_fully) = plan_root(given, first, resolved);
+    if check_fully && fs.check_levels(&root_path, false) == LevelCheck::Refuse {
+        return Err(ScanError::OnlineOnly);
+    }
+    fs.ensure_directory(&root_path, false).map_err(scan_error)?;
+    Ok(root_path)
+}
+
 /// The final path of `path` (verbatim, no NUL) with links resolved, in the
 /// form `verbatim_path` gives: `\\?\C:\x` or `\\?\UNC\nas\share\x`, a drive
 /// or share root with one trailing backslash. Opens the object for attribute
@@ -681,22 +731,7 @@ fn scan_walk_limited(root: &Path, progress: &Progress, limits: Limits) -> Result
         return Err(ScanError::Io(io::Error::new(io::ErrorKind::InvalidInput, "Device paths are not supported")));
     }
     let given = verbatim_path(root).map_err(scan_error)?;
-    // The path as given is checked before anything on it is opened: opening
-    // an online-only item can already make the provider fetch it. Links on
-    // the way are checked themselves; what lies behind them is checked once
-    // they are resolved, and so is a path that resolves elsewhere without a
-    // link on the way.
-    let first = check_levels(&given, true);
-    if first == LevelCheck::Refuse {
-        return Err(ScanError::OnlineOnly);
-    }
-    ensure_directory(&given, true).map_err(scan_error)?;
-    let resolved = final_path(&given);
-    let (root_path, check_fully) = plan_root(given, first, resolved);
-    if check_fully && check_levels(&root_path, false) == LevelCheck::Refuse {
-        return Err(ScanError::OnlineOnly);
-    }
-    ensure_directory(&root_path, false).map_err(scan_error)?;
+    let root_path = listed_root(given, &Disk)?;
     let root_name = root_name(root).map_err(scan_error)?;
     if root_name.len() > names_limit {
         return Err(names_too_long());
@@ -998,6 +1033,125 @@ mod tests {
         for limit in [total - 1, root_name(tmp.path()).unwrap().len() - 1] {
             let err = walk(limit).err().expect("names beyond the limit accepted");
             assert_eq!(err.to_string(), "Read error: file names exceed 4 GiB");
+        }
+    }
+
+    /// A file system that answers from a script and records what it was asked.
+    struct Scripted {
+        /// The paths with an online-only level.
+        online_only: Vec<&'static str>,
+        /// The paths that end the first check at a link.
+        links: Vec<&'static str>,
+        /// Where a path resolves to.
+        resolves: Vec<(&'static str, &'static str)>,
+        /// The paths that are not folders.
+        not_folders: Vec<&'static str>,
+        asked: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Scripted {
+        fn new() -> Self {
+            Scripted {
+                online_only: Vec::new(),
+                links: Vec::new(),
+                resolves: Vec::new(),
+                not_folders: Vec::new(),
+                asked: Default::default(),
+            }
+        }
+
+        fn note(&self, what: &str, path: &[u16]) -> String {
+            let path = String::from_utf16_lossy(path);
+            self.asked.borrow_mut().push(format!("{what} {path}"));
+            path
+        }
+
+        /// The root to list for `given`, and what the file system was asked on the way.
+        fn root(&self, given: &str) -> (Result<String, String>, Vec<String>) {
+            let wide: Vec<u16> = given.encode_utf16().collect();
+            let outcome = listed_root(wide, self).map(|p| String::from_utf16_lossy(&p)).map_err(|e| e.to_string());
+            (outcome, self.asked.take())
+        }
+    }
+
+    impl RootFs for Scripted {
+        fn check_levels(&self, path: &[u16], stop_at_link: bool) -> LevelCheck {
+            let path = self.note(if stop_at_link { "levels-to-link" } else { "levels" }, path);
+            if self.online_only.contains(&path.as_str()) {
+                LevelCheck::Refuse
+            } else if stop_at_link && self.links.contains(&path.as_str()) {
+                LevelCheck::ReachedLink
+            } else {
+                LevelCheck::Proceed
+            }
+        }
+
+        fn ensure_directory(&self, path: &[u16], allow_link: bool) -> io::Result<()> {
+            let path = self.note(if allow_link { "folder-or-link" } else { "folder" }, path);
+            if self.not_folders.contains(&path.as_str()) { Err(io::ErrorKind::NotADirectory.into()) } else { Ok(()) }
+        }
+
+        fn final_path(&self, path: &[u16]) -> Option<Vec<u16>> {
+            let path = self.note("resolve", path);
+            let to = self.resolves.iter().find(|(from, _)| *from == path).map_or(path.as_str(), |(_, to)| to);
+            Some(to.encode_utf16().collect())
+        }
+    }
+
+    const ONLINE_ONLY: &str =
+        "This folder is online-only; open it once in Explorer to make it available, then scan again.";
+
+    #[test]
+    fn an_online_only_level_of_the_given_path_refuses_before_anything_is_opened() {
+        let mut fs = Scripted::new();
+        fs.online_only = vec!["G"];
+        let (outcome, asked) = fs.root("G");
+        assert_eq!(outcome, Err(ONLINE_ONLY.to_string()));
+        assert_eq!(asked, ["levels-to-link G"]);
+    }
+
+    #[test]
+    fn an_online_only_level_behind_a_link_or_a_resolved_path_refuses() {
+        // Behind a link: the path it resolves to is checked in full.
+        let mut fs = Scripted::new();
+        fs.links = vec!["G"];
+        fs.resolves = vec![("G", "R")];
+        fs.online_only = vec!["R"];
+        let (outcome, asked) = fs.root("G");
+        assert_eq!(outcome, Err(ONLINE_ONLY.to_string()));
+        assert_eq!(asked, ["levels-to-link G", "folder-or-link G", "resolve G", "levels R"]);
+        // No link on the way, but the path lies elsewhere (a `subst` or mapped drive).
+        let mut fs = Scripted::new();
+        fs.resolves = vec![("G", "R")];
+        fs.online_only = vec!["R"];
+        assert_eq!(fs.root("G").0, Err(ONLINE_ONLY.to_string()));
+        // A link that resolves to the same path: still checked in full.
+        let mut fs = Scripted::new();
+        fs.links = vec!["G"];
+        let (outcome, asked) = fs.root("G");
+        assert_eq!(outcome, Ok("G".to_string()));
+        assert_eq!(asked, ["levels-to-link G", "folder-or-link G", "resolve G", "levels G", "folder G"]);
+    }
+
+    #[test]
+    fn the_resolved_path_is_listed_and_a_plain_path_is_checked_once() {
+        let fs = Scripted::new();
+        let (outcome, asked) = fs.root("G");
+        assert_eq!(outcome, Ok("G".to_string()));
+        assert_eq!(asked, ["levels-to-link G", "folder-or-link G", "resolve G", "folder G"]);
+        let mut fs = Scripted::new();
+        fs.resolves = vec![("G", "R")];
+        let (outcome, asked) = fs.root("G");
+        assert_eq!(outcome, Ok("R".to_string()));
+        assert_eq!(asked, ["levels-to-link G", "folder-or-link G", "resolve G", "levels R", "folder R"]);
+        // What is not a folder ends with that error, whichever of the two paths it is.
+        for (not_a_folder, last) in [("G", "folder-or-link G"), ("R", "folder R")] {
+            let mut fs = Scripted::new();
+            fs.resolves = vec![("G", "R")];
+            fs.not_folders = vec![not_a_folder];
+            let (outcome, asked) = fs.root("G");
+            assert_eq!(outcome, Err("Read error: not a folder".to_string()), "{not_a_folder}");
+            assert_eq!(asked.last().map(String::as_str), Some(last));
         }
     }
 

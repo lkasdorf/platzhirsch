@@ -355,36 +355,47 @@ impl VolumeReader for RawVolume {
     /// `offset` and `buf.len()` are sector-aligned (the scanner guarantees it).
     /// After a short read the next read starts on a sector boundary again.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        let mut pos = 0usize;
-        while pos < buf.len() {
-            let at = offset
-                .checked_add(pos as u64)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Offset too large"))?;
-            match self.file.seek_read(&mut buf[pos..], at) {
-                Ok(0) => {
+        let file = &self.file;
+        read_fully(|part, at| file.seek_read(part, at), offset, buf, self.sector_size)
+    }
+}
+
+/// Fills `buf` from `offset` with as many calls of `read` as it takes; `read`
+/// gets the part still to fill and where it starts, and returns how many bytes
+/// it delivered. After a short read the next one starts on the last `sector`
+/// boundary that was reached completely.
+fn read_fully(
+    mut read: impl FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+    offset: u64,
+    buf: &mut [u8],
+    sector: usize,
+) -> std::io::Result<()> {
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        let at = offset
+            .checked_add(pos as u64)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Offset too large"))?;
+        match read(&mut buf[pos..], at) {
+            Ok(0) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Read past the end of the volume"));
+            }
+            Ok(n) => {
+                let done = pos + n;
+                let next = if done >= buf.len() { done } else { resume_point(done, sector) };
+                if next <= pos {
+                    // Less than one sector arrived; reading on would never end.
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "Read past the end of the volume",
+                        "The volume returned less than one sector",
                     ));
                 }
-                Ok(n) => {
-                    let done = pos + n;
-                    let next = if done >= buf.len() { done } else { resume_point(done, self.sector_size) };
-                    if next <= pos {
-                        // Less than one sector arrived; reading on would never end.
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "The volume returned less than one sector",
-                        ));
-                    }
-                    pos = next;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                pos = next;
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
-        Ok(())
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -476,6 +487,101 @@ mod tests {
         assert_eq!(resume_point(1024, 512), 1024);
         assert_eq!(resume_point(0, 4096), 0);
         assert_eq!(resume_point(300, 0), 300);
+    }
+
+    /// A volume of `len` bytes whose byte at offset `i` is `i % 251`. Each read
+    /// delivers at most the next length from `chunks` (then everything asked
+    /// for) and is recorded as (offset, length asked for).
+    struct Chunked {
+        len: u64,
+        chunks: Vec<usize>,
+        reads: Vec<(u64, usize)>,
+    }
+
+    impl Chunked {
+        fn new(len: u64, chunks: &[usize]) -> Self {
+            Chunked { len, chunks: chunks.iter().rev().copied().collect(), reads: Vec::new() }
+        }
+
+        fn read(&mut self, part: &mut [u8], at: u64) -> std::io::Result<usize> {
+            self.reads.push((at, part.len()));
+            let left = self.len.saturating_sub(at) as usize;
+            let n = self.chunks.pop().unwrap_or(usize::MAX).min(part.len()).min(left);
+            for (i, byte) in part[..n].iter_mut().enumerate() {
+                *byte = ((at + i as u64) % 251) as u8;
+            }
+            Ok(n)
+        }
+    }
+
+    fn expected(offset: u64, len: usize) -> Vec<u8> {
+        (0..len as u64).map(|i| ((offset + i) % 251) as u8).collect()
+    }
+
+    #[test]
+    fn short_reads_resume_on_a_sector_boundary() {
+        // 700 bytes arrive, then 900, then the rest: the reads restart at 512 and 1024.
+        let mut volume = Chunked::new(1 << 20, &[700, 900]);
+        let mut buf = vec![0u8; 2048];
+        read_fully(|part, at| volume.read(part, at), 4096, &mut buf, 512).unwrap();
+        assert_eq!(buf, expected(4096, 2048));
+        assert_eq!(volume.reads, [(4096, 2048), (4096 + 512, 1536), (4096 + 1024, 1024)]);
+        // A read that delivers everything is the only one.
+        let mut volume = Chunked::new(1 << 20, &[]);
+        read_fully(|part, at| volume.read(part, at), 0, &mut buf, 512).unwrap();
+        assert_eq!((buf.clone(), volume.reads.len()), (expected(0, 2048), 1));
+        // What arrived beyond the last full sector is read again.
+        let mut volume = Chunked::new(1 << 20, &[1800]);
+        read_fully(|part, at| volume.read(part, at), 0, &mut buf, 512).unwrap();
+        assert_eq!(buf, expected(0, 2048));
+        assert_eq!(volume.reads, [(0, 2048), (1536, 512)]);
+        // Sectors of 4096 bytes: 5000 bytes count as one sector.
+        let mut volume = Chunked::new(1 << 20, &[5000]);
+        let mut buf = vec![0u8; 8192];
+        read_fully(|part, at| volume.read(part, at), 8192, &mut buf, 4096).unwrap();
+        assert_eq!(buf, expected(8192, 8192));
+        assert_eq!(volume.reads, [(8192, 8192), (8192 + 4096, 4096)]);
+    }
+
+    #[test]
+    fn reads_that_cannot_finish_end_with_an_error() {
+        let text = |r: std::io::Result<()>| r.unwrap_err().to_string();
+        let mut buf = vec![0u8; 2048];
+        // Less than one sector, again and again: reading on would never end.
+        let mut volume = Chunked::new(1 << 20, &[100]);
+        let err = read_fully(|part, at| volume.read(part, at), 0, &mut buf, 512);
+        assert_eq!(text(err), "The volume returned less than one sector");
+        assert_eq!(volume.reads.len(), 1);
+        // The volume ends inside the buffer.
+        let mut volume = Chunked::new(1024, &[]);
+        let err = read_fully(|part, at| volume.read(part, at), 0, &mut buf, 512);
+        assert_eq!(text(err), "Read past the end of the volume");
+        // Less than one sector after a full one: the same, once the first sector is in.
+        let mut volume = Chunked::new(1 << 20, &[512, 100]);
+        let err = read_fully(|part, at| volume.read(part, at), 0, &mut buf, 512);
+        assert_eq!(text(err), "The volume returned less than one sector");
+        assert_eq!(volume.reads, [(0, 2048), (512, 1536)]);
+        // The offset of the next read would not fit into 64 bits.
+        let err = read_fully(|part, _| Ok(part.len().min(512)), u64::MAX - 600, &mut buf, 512);
+        assert_eq!(text(err), "Offset too large");
+        // Any other error is passed on; an interrupted read is tried again.
+        let mut calls = 0;
+        let err = read_fully(
+            |_, _| {
+                calls += 1;
+                Err(std::io::Error::from(if calls == 1 {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::PermissionDenied
+                }))
+            },
+            0,
+            &mut buf,
+            512,
+        );
+        assert_eq!((err.unwrap_err().kind(), calls), (std::io::ErrorKind::PermissionDenied, 2));
+        // Nothing to read: no call at all.
+        read_fully(|_, _| panic!("read for an empty buffer"), 0, &mut [], 512).unwrap();
     }
 
     #[test]
