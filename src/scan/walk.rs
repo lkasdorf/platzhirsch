@@ -436,6 +436,22 @@ fn names_too_long() -> ScanError {
     ScanError::Io(io::Error::other("file names exceed 4 GiB"))
 }
 
+/// The tree cannot take more entries: its ids end below `NO_PARENT`.
+fn too_many_entries() -> ScanError {
+    ScanError::Io(io::Error::other("more than 4,294,967,295 files and folders"))
+}
+
+/// What a walk may put into the tree, the root included.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// Bytes of names.
+    names: usize,
+    /// Files and folders.
+    entries: usize,
+}
+
+const LIMITS: Limits = Limits { names: NAMES_LIMIT, entries: NO_PARENT as usize };
+
 fn scan_error(e: io::Error) -> ScanError {
     if e.kind() == io::ErrorKind::PermissionDenied { ScanError::FolderAccessDenied } else { ScanError::Io(e) }
 }
@@ -643,7 +659,7 @@ fn entry_attributes(path: &[u16]) -> Option<(u32, u32)> {
 /// The root gets its absolute path without a trailing backslash as its name.
 /// A root that is a link is listed as the folder it points to.
 pub fn scan_walk(root: &Path, progress: &Progress) -> Result<ScanResult, ScanError> {
-    scan_walk_limited(root, progress, NAMES_LIMIT)
+    scan_walk_limited(root, progress, LIMITS)
 }
 
 #[cfg(test)]
@@ -652,8 +668,9 @@ thread_local! {
     static PANIC_IN_COORDINATOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// `scan_walk` with at most `names_limit` bytes of names in the tree, the root's included.
-fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Result<ScanResult, ScanError> {
+/// `scan_walk` with other limits for what the tree may take.
+fn scan_walk_limited(root: &Path, progress: &Progress, limits: Limits) -> Result<ScanResult, ScanError> {
+    let Limits { names: names_limit, entries: entries_limit } = limits;
     let started = Instant::now();
     if progress.cancel.load(Ordering::Relaxed) {
         return Err(ScanError::Cancelled);
@@ -685,6 +702,8 @@ fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Re
         return Err(names_too_long());
     }
     let mut name_bytes = root_name.len();
+    // The root is the first entry.
+    let mut entry_count = 1usize;
 
     let mut b = TreeBuilder::with_capacity(4096, 64 * 1024);
     let root_id = b.push(&root_name, NO_PARENT, 0, 0, 0, F_DIR);
@@ -732,6 +751,13 @@ fn scan_walk_limited(root: &Path, progress: &Progress, names_limit: usize) -> Re
                     break 'listings Err(names_too_long());
                 }
                 name_bytes += e.name.len();
+                // Every name has at least one byte, so the names' limit is reached first as
+                // long as it is the lower one. This limit says so itself and ends the walk
+                // with an error before the tree would refuse the entry.
+                if entry_count >= entries_limit {
+                    break 'listings Err(too_many_entries());
+                }
+                entry_count += 1;
                 let link = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 && e.reparse_tag & REPARSE_NAME_SURROGATE != 0;
                 if e.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                     b.push(&e.name, job.dir, e.size, e.allocated, e.mtime, if link { F_LINK } else { 0 });
@@ -933,14 +959,14 @@ mod tests {
     /// `Some(None)` if the walk panicked, `None` if it did not return in time.
     fn walk_with_timeout(
         root: &Path,
-        names_limit: usize,
+        limits: Limits,
         panic_in_coordinator: bool,
     ) -> Option<Option<Result<ScanResult, ScanError>>> {
         let (tx, rx) = mpsc::channel();
         let root = root.to_path_buf();
         std::thread::spawn(move || {
             PANIC_IN_COORDINATOR.set(panic_in_coordinator);
-            let outcome = std::panic::catch_unwind(|| scan_walk_limited(&root, &Progress::default(), names_limit));
+            let outcome = std::panic::catch_unwind(|| scan_walk_limited(&root, &Progress::default(), limits));
             let _ = tx.send(outcome.ok());
         });
         rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
@@ -949,11 +975,11 @@ mod tests {
     #[test]
     fn panic_in_the_coordinating_step_ends_the_walk() {
         let tmp = tempfile::tempdir().unwrap();
-        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, true)
+        let outcome = walk_with_timeout(tmp.path(), LIMITS, true)
             .expect("the walk hangs after a panic in its coordinating step");
         assert!(outcome.is_none(), "the panic does not propagate");
         // Without the injected panic the same walk succeeds.
-        let outcome = walk_with_timeout(tmp.path(), NAMES_LIMIT, false).expect("the walk hangs");
+        let outcome = walk_with_timeout(tmp.path(), LIMITS, false).expect("the walk hangs");
         assert!(matches!(outcome, Some(Ok(_))));
     }
 
@@ -964,13 +990,33 @@ mod tests {
         let file = tempfile::NamedTempFile::new_in(tmp.path()).unwrap();
         let name_len = |p: &Path| p.file_name().unwrap().to_str().unwrap().len();
         let total = root_name(tmp.path()).unwrap().len() + name_len(sub.path()) + name_len(file.path());
-        let walk = |limit| walk_with_timeout(tmp.path(), limit, false).expect("the walk hangs").expect("the walk panics");
+        let walk = |names| {
+            walk_with_timeout(tmp.path(), Limits { names, ..LIMITS }, false).expect("the walk hangs").expect("the walk panics")
+        };
         let tree = walk(total).expect("names within the limit");
         assert_eq!(tree.tree.len(), 3);
         for limit in [total - 1, root_name(tmp.path()).unwrap().len() - 1] {
             let err = walk(limit).err().expect("names beyond the limit accepted");
             assert_eq!(err.to_string(), "Read error: file names exceed 4 GiB");
         }
+    }
+
+    #[test]
+    fn entries_beyond_the_limit_end_the_walk_with_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _sub = tempfile::tempdir_in(tmp.path()).unwrap();
+        let _file = tempfile::NamedTempFile::new_in(tmp.path()).unwrap();
+        let walk = |entries| {
+            walk_with_timeout(tmp.path(), Limits { entries, ..LIMITS }, false).expect("the walk hangs").expect("the walk panics")
+        };
+        // The root and its two entries.
+        assert_eq!(walk(3).expect("entries within the limit").tree.len(), 3);
+        for limit in [2, 1] {
+            let err = walk(limit).err().expect("entries beyond the limit accepted");
+            assert_eq!(err.to_string(), "Read error: more than 4,294,967,295 files and folders");
+        }
+        // The limit in use is what the tree can number.
+        assert_eq!(LIMITS.entries, u32::MAX as usize);
     }
 
     #[test]
